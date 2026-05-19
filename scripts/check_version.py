@@ -21,7 +21,6 @@ SEMVER = r"\d+\.\d+\.\d+"
 # The captured group is compared against the VERSION file.
 CHECKS: list[tuple[str, str]] = [
     ("backend_api_python/app/_version.py", rf'APP_VERSION\s*=\s*"({SEMVER})"'),
-    ("backend_api_python/env.example", rf"^BRAND_APP_VERSION=({SEMVER})"),
     # README shields.io badges are dynamic (GitHub release endpoint) and not checked here.
     # README `quantdinger-frontend:X.Y.Z` mentions are not checked — FE and BE
     # are versioned independently and the compose default is `latest`.

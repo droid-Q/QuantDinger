@@ -31,12 +31,6 @@ PATCHES: list[tuple[str, str, str]] = [
         rf'APP_VERSION\s*=\s*"{SEMVER}"',
         'APP_VERSION = "{v}"',
     ),
-    # Backend env.example default.
-    (
-        "backend_api_python/env.example",
-        rf"^BRAND_APP_VERSION={SEMVER}",
-        "BRAND_APP_VERSION={v}",
-    ),
     # README shields.io badges are dynamic (pulled from GitHub releases via
     # `/github/v/release/<owner>/<repo>`) and need no manual bump here.
     # `quantdinger-frontend:X.Y.Z` mentions in README are intentionally left

@@ -139,13 +139,6 @@ CONFIG_SCHEMA = {
                 'description': 'Product name shown in the browser tab title and footer copyright.'
             },
             {
-                'key': 'BRAND_APP_VERSION',
-                'label': 'App Version',
-                'type': 'text',
-                'default': APP_VERSION,
-                'description': 'Version label shown in the sidebar footer. Leave blank to fall back to the backend build version.'
-            },
-            {
                 'key': 'BRAND_COPYRIGHT',
                 'label': 'Footer Copyright',
                 'type': 'text',
@@ -1479,7 +1472,6 @@ def get_public_config():
 # fresh install still ships with sane copy / links instead of blanks.
 _BRAND_DEFAULTS = {
     'app_name': 'QuantDinger',
-    'app_version': APP_VERSION,
     'copyright': '© 2025-2026 QuantDinger. All rights reserved.',
     'contact_email': 'brokermr810@gmail.com',
     'contact_support_url': 'https://t.me/quantdinger',
@@ -1533,7 +1525,7 @@ def get_brand_config():
         'msg': 'success',
         'data': {
             'app_name': _brand_env('BRAND_APP_NAME', 'app_name'),
-            'app_version': _brand_env('BRAND_APP_VERSION', 'app_version'),
+            'app_version': APP_VERSION,
             'copyright': _brand_env('BRAND_COPYRIGHT', 'copyright'),
             'logos': {
                 'light': _brand_env('BRAND_LOGO_LIGHT_URL'),
