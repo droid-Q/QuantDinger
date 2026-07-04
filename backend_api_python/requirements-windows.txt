@@ -1,1 +1,2 @@
 # Windows-specific optional dependencies.
+MetaTrader5>=5.0.5735

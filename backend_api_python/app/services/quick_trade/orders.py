@@ -93,6 +93,13 @@ def limit_order_kwargs(client, symbol, amount, price, side, market_type, client_
     from app.services.live_trading.binance_spot import BinanceSpotClient
     from app.services.live_trading.bybit import BybitClient
     from app.services.live_trading.okx import OkxClient
+    try:
+        from app.services.mt5_trading import MT5Client
+    except Exception:
+        MT5Client = None
+
+    if MT5Client is not None and isinstance(client, MT5Client):
+        return {"size": amount, "price": price, "client_order_id": client_order_id}
 
     if isinstance(client, (BinanceFuturesClient, BinanceSpotClient)):
         return {"quantity": amount, "price": price, "client_order_id": client_order_id}

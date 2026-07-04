@@ -57,6 +57,8 @@ def search_market_symbols(market: str, keyword: str, limit: int = 20) -> list:
     existing = {r["symbol"] for r in out}
     if market == "Crypto":
         out.extend(_search_crypto_exchange(keyword, limit - len(out), existing))
+    elif market == "MT5":
+        out.append({"market": "MT5", "symbol": keyword, "name": keyword})
     elif market in {"USStock", "CNStock", "HKStock"}:
         out.extend(_search_external_symbols(market, keyword, limit - len(out), existing))
 
@@ -80,6 +82,8 @@ def find_market_symbol(market: str, symbol: str) -> dict | None:
 
     if market == "Crypto":
         rows = _search_crypto_exchange(symbol, 10, set())
+    elif market == "MT5":
+        rows = [{"market": "MT5", "symbol": symbol, "name": symbol}]
     elif market in {"USStock", "CNStock", "HKStock"}:
         rows = _search_external_symbols(market, symbol, 10, set())
     else:
@@ -267,4 +271,3 @@ def _search_external_symbols(market: str, keyword: str, limit: int, existing: se
     if rows:
         _market_cache.set(cache_key, rows, SYMBOL_SEARCH_CACHE_TTL_SEC)
     return [r for r in rows if r.get("symbol") not in existing][:limit]
-

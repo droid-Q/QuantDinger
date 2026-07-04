@@ -13,7 +13,7 @@ from app.utils.logger import get_logger
 logger = get_logger(__name__)
 
 VALID_MARKETS = frozenset({
-    "Crypto", "USStock", "CNStock", "HKStock", "Forex", "Futures", "MOEX",
+    "Crypto", "USStock", "CNStock", "HKStock", "Forex", "MT5", "Futures", "MOEX",
 })
 CN_A_SHARE_PATTERN = re.compile(r"^\d{6}$")
 
@@ -191,4 +191,3 @@ def _backfill_row_name(cur, user_id: int, row: dict) -> None:
             )
     except Exception:
         return
-

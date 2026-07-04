@@ -33,6 +33,15 @@ def fetch_balance_raw(
     raw: Any = None
 
     try:
+        if exchange in ("mt5", "cptmarkets", "cpt_markets") and hasattr(client, "get_balance"):
+            raw = client.get_balance()
+            currency = str(raw.get("currency") or "USD") if isinstance(raw, dict) else "USD"
+            return {
+                "available": float((raw or {}).get("freeMargin") or (raw or {}).get("marginFree") or 0),
+                "total": float((raw or {}).get("equity") or (raw or {}).get("balance") or 0),
+                "currency": currency,
+                "raw": raw,
+            }
         if isinstance(client, BitgetSpotClient) and hasattr(client, "get_assets"):
             raw = client.get_assets()
             return parse_balance(raw, exchange_id, market_type)

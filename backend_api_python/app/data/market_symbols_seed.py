@@ -13,6 +13,17 @@ from app.utils.logger import get_logger
 
 logger = get_logger(__name__)
 
+_MT5_HOT_SYMBOLS = [
+    ("XAUUSD", "Gold Spot"),
+    ("XAGUSD", "Silver Spot"),
+    ("EURUSD", "Euro / US Dollar"),
+    ("GBPUSD", "British Pound / US Dollar"),
+    ("USDJPY", "US Dollar / Japanese Yen"),
+    ("US30", "Dow Jones 30"),
+    ("NAS100", "Nasdaq 100"),
+    ("USOIL", "WTI Crude Oil"),
+]
+
 
 def _get_db_connection():
     """Get database connection, returns None if not available."""
@@ -37,6 +48,11 @@ def get_hot_symbols(market: str, limit: int = 10) -> List[Dict]:
     market = (market or '').strip()
     if not market:
         return []
+    if market == "MT5":
+        return [
+            {"market": "MT5", "symbol": symbol, "name": name}
+            for symbol, name in _MT5_HOT_SYMBOLS[:max(limit, 0)]
+        ]
     
     try:
         with _get_db_connection() as db:
@@ -74,6 +90,14 @@ def search_symbols(market: str, keyword: str, limit: int = 20) -> List[Dict]:
     kw = (keyword or '').strip()
     if not market or not kw:
         return []
+    if market == "MT5":
+        needle = kw.upper()
+        rows = [
+            {"market": "MT5", "symbol": symbol, "name": name}
+            for symbol, name in _MT5_HOT_SYMBOLS
+            if needle in symbol.upper() or needle in name.upper()
+        ]
+        return rows[:max(limit, 0)] or [{"market": "MT5", "symbol": needle, "name": needle}]
     
     pattern = f'%{kw}%'
     prefix_pattern = f'{kw}%'

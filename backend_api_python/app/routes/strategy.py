@@ -634,7 +634,7 @@ def test_connection():
         if not ex_id:
             return jsonify({'code': 0, 'msg': 'Please select an exchange', 'data': None})
 
-        if ex_id == 'ibkr':
+        if ex_id in ('ibkr', 'mt5', 'cptmarkets', 'cpt_markets'):
             if not local_desktop_brokers_allowed():
                 return jsonify({'code': 0, 'msg': desktop_broker_cloud_reject_message(), 'data': None})
             logger.info("Testing connection: exchange_id=%s (local desktop broker, skipping API key check)", ex_id)

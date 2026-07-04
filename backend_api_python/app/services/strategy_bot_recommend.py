@@ -156,7 +156,7 @@ def _bot_recommend_system_prompt(detected_market: str, allowed_bots: list[str]) 
         f"Allowed bot types for this market are: {allowed_bots}. Do NOT recommend a botType outside this list.\n"
         if detected_market else ""
     )
-    quote_label = "USD" if detected_market in ("USStock", "Forex") else "USDT"
+    quote_label = "USD" if detected_market in ("USStock", "Forex", "MT5") else "USDT"
 
     return (
         "You are an expert quantitative trading advisor. The user wants to create an automated trading bot.\n"
@@ -178,11 +178,11 @@ def _bot_recommend_system_prompt(detected_market: str, allowed_bots: list[str]) 
         f"Bot type x market matrix: {dict(BOT_TYPE_MARKETS)}\n"
         f"{market_constraint}"
         "Also suggest base config:\n"
-        f"- marketCategory: 'Crypto'|'USStock'|'Forex' (must match the detected market: '{detected_market or 'Crypto'}')\n"
+        f"- marketCategory: 'Crypto'|'USStock'|'Forex'|'MT5' (must match the detected market: '{detected_market or 'Crypto'}')\n"
         "- symbol: string\n"
         "- timeframe: '1m'|'5m'|'15m'|'1h'|'4h'|'1d'\n"
-        "- marketType: 'swap'|'spot' (USStock and Forex are always 'spot')\n"
-        "- leverage: int(1-125, only for swap; ignored on spot/USStock/Forex)\n"
+        "- marketType: 'swap'|'spot' (USStock, Forex, and MT5 are always 'spot')\n"
+        "- leverage: int(1-125, only for swap; ignored on spot/USStock/Forex/MT5)\n"
         f"- initialCapital: number (in {quote_label})\n\n"
         "Risk config:\n"
         "- stopLossPct: number(0-100), stored as a 0-100 UI percent\n"
@@ -211,7 +211,7 @@ def _normalize_recommendation(result: Dict[str, Any], detected_market: str, dete
         base_cfg["marketCategory"] = detected_market
     elif not base_cfg.get("marketCategory"):
         base_cfg["marketCategory"] = "Crypto"
-    if base_cfg.get("marketCategory") in ("USStock", "Forex"):
+    if base_cfg.get("marketCategory") in ("USStock", "Forex", "MT5"):
         base_cfg["marketType"] = "spot"
         base_cfg["leverage"] = 1
     if detected_symbol:
@@ -222,7 +222,7 @@ def _normalize_recommendation(result: Dict[str, Any], detected_market: str, dete
     risk_cfg = result.get("riskConfig") if isinstance(result.get("riskConfig"), dict) else {}
     bot_type = result.get("botType")
     market_type = base_cfg.get("marketType") or "spot"
-    force_long = market_type == "spot" or base_cfg.get("marketCategory") in ("USStock", "Forex")
+    force_long = (market_type == "spot" and base_cfg.get("marketCategory") != "MT5") or base_cfg.get("marketCategory") in ("USStock", "Forex")
 
     if bot_type == "grid":
         params.pop("amountPerGrid", None)

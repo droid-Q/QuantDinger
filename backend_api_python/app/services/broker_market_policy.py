@@ -43,6 +43,11 @@ def _build_broker_markets() -> Dict[str, Dict[str, Set[str]]]:
             "USStock": {"spot"},
             "Crypto": {"spot"},
         },
+        # MT5 symbol availability is broker-account specific, so exact
+        # contract validation happens at order_check/order_send time.
+        "mt5": {"MT5": {"spot"}},
+        "cptmarkets": {"MT5": {"spot"}},
+        "cpt_markets": {"MT5": {"spot"}},
     }
     for ex, capability in CRYPTO_VENUE_CAPABILITIES.items():
         matrix[ex] = {"Crypto": set(capability.market_types)}
@@ -72,15 +77,15 @@ LONG_ONLY_BROKERS: Set[str] = {"ibkr", "alpaca"}
 BOT_TYPE_MARKETS: Dict[str, Set[str]] = {
     "grid":       {"Crypto"},
     "martingale": {"Crypto"},
-    "dca":        {"Crypto", "USStock"},
-    "trend":      {"Crypto", "USStock"},
+    "dca":        {"Crypto", "USStock", "MT5"},
+    "trend":      {"Crypto", "USStock", "MT5"},
 }
 
 
 # Markets we recognize as legal canonical values. Anything outside this set
 # is considered analysis/backtest-only (e.g. CNStock, HKStock, MOEX, Futures
 # generic) and may not be used for live strategies.
-LIVE_MARKET_CATEGORIES: Set[str] = {"Crypto", "USStock"}
+LIVE_MARKET_CATEGORIES: Set[str] = {"Crypto", "USStock", "MT5"}
 
 
 # ---------------------------------------------------------------------------

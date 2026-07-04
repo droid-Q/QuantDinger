@@ -42,6 +42,9 @@ _MARKET_ALIASES: Dict[str, str] = {
     "equities": "USStock",
     "alpaca": "USStock",
     "ibkr": "USStock",
+    "mt5": "MT5",
+    "cptmarkets": "MT5",
+    "cpt_markets": "MT5",
     "cnstock": "CNStock",
     "cn_stock": "CNStock",
     "ashare": "CNStock",
@@ -80,7 +83,7 @@ class DataSourceFactory:
     _noise_interval_sec = _env_positive_int("LOG_DEDUPE_INTERVAL_SEC", 60)
     
     # Markets that pass through normalize_market unchanged.
-    _CANONICAL_MARKETS = ("Crypto", "Forex", "Futures", "USStock", "CNStock", "HKStock", "MOEX")
+    _CANONICAL_MARKETS = ("Crypto", "Forex", "MT5", "Futures", "USStock", "CNStock", "HKStock", "MOEX")
 
     @classmethod
     def _log_limited(cls, level: str, key: str, message: str, *args: Any) -> None:
@@ -113,7 +116,7 @@ class DataSourceFactory:
             logger.warning(
                 "DataSourceFactory.normalize_market(): empty market category — "
                 "falling back to 'Crypto'. Caller MUST supply an explicit market "
-                "(USStock / Forex / Futures / Crypto / CNStock / HKStock / MOEX). "
+                "(USStock / Forex / MT5 / Futures / Crypto / CNStock / HKStock / MOEX). "
                 "This fallback is deprecated and will become a hard error.",
                 stack_info=False,
             )
@@ -200,6 +203,9 @@ class DataSourceFactory:
         elif market == 'Forex':
             from app.data_sources.forex import ForexDataSource
             return ForexDataSource()
+        elif market == 'MT5':
+            from app.data_sources.mt5 import MT5DataSource
+            return MT5DataSource()
         elif market == 'Futures':
             from app.data_sources.futures import FuturesDataSource
             return FuturesDataSource()
@@ -343,4 +349,3 @@ class DataSourceFactory:
                 str(e),
             )
             return {'last': 0, 'symbol': symbol}
-

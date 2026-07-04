@@ -5,7 +5,11 @@ from app.services.quick_trade.errors import (
     merge_balance_leg_errors,
     parse_trade_error_hint,
 )
-from app.services.quick_trade.symbols import is_supported_crypto_exchange, symbols_match
+from app.services.quick_trade.symbols import (
+    is_supported_crypto_exchange,
+    is_supported_quick_trade_exchange,
+    symbols_match,
+)
 
 
 def test_parse_trade_error_hint_for_insufficient_balance():
@@ -47,3 +51,8 @@ def test_symbols_match_exchange_native_suffixes():
 def test_supported_crypto_exchange_policy():
     assert is_supported_crypto_exchange("okx")
     assert not is_supported_crypto_exchange("alpaca")
+
+
+def test_supported_quick_trade_exchange_allows_mt5_brokers():
+    assert is_supported_quick_trade_exchange("cptmarkets")
+    assert is_supported_quick_trade_exchange("mt5")

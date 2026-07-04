@@ -118,8 +118,8 @@ def signal_to_order_sides(signal_type: str) -> Tuple[str, str, bool]:
         return "buy", "long", False
     if sig in ("open_short", "add_short"):
         return "sell", "short", False
-    if sig in ("close_long", "reduce_long"):
+    if sig in ("close_long", "reduce_long", "close_long_stop", "close_long_profit", "close_long_trailing"):
         return "sell", "long", True
-    if sig in ("close_short", "reduce_short"):
+    if sig in ("close_short", "reduce_short", "close_short_stop", "close_short_profit", "close_short_trailing"):
         return "buy", "short", True
     raise LiveTradingError(f"Unsupported signal_type: {signal_type}")

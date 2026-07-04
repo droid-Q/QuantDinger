@@ -35,7 +35,8 @@ from app.services.quick_trade.errors import (
 )
 from app.services.quick_trade.orders import enrich_fill, limit_order_kwargs
 from app.services.quick_trade.symbols import (
-    is_supported_crypto_exchange,
+    is_mt5_exchange,
+    is_supported_quick_trade_exchange,
     symbols_match as quick_trade_symbols_match,
 )
 from app.utils.request_guard import RequestGuardError, cache_key, guarded_cached
@@ -208,12 +209,12 @@ def _convert_usdt_to_base_qty(client, symbol: str, usdt_amount: float, market_ty
 
 
 def _reject_quick_trade_if_desktop_broker(exchange_id: str):
-    """Quick Trade is USDT-centric and only wired to crypto exchange clients."""
-    if not is_supported_crypto_exchange(exchange_id):
+    """Quick Trade supports crypto exchanges and MT5 terminal brokers."""
+    if not is_supported_quick_trade_exchange(exchange_id):
         return jsonify(
             {
                 "code": 0,
-                "msg": "Quick Trade currently supports crypto exchange API keys only.",
+                "msg": "Quick Trade currently supports crypto exchange API keys and MT5 terminal brokers only.",
             }
         ), 400
     return None
@@ -349,6 +350,10 @@ def place_order():
         exchange_id = (exchange_config.get("exchange_id") or "").strip().lower()
         if not exchange_id:
             return jsonify({"code": 0, "msg": "Invalid credential: missing exchange_id"}), 400
+        mt5_mode = is_mt5_exchange(exchange_id)
+        if mt5_mode:
+            market_type = "spot"
+            exchange_config["market_type"] = market_type
 
         qt_rej = _reject_quick_trade_if_desktop_broker(exchange_id)
         if qt_rej is not None:
@@ -369,10 +374,10 @@ def place_order():
         # Quick trade always accepts USDT amount, convert to base qty for all exchanges
         # For limit orders, use the provided price; for market orders, fetch current price
         limit_price_for_conversion = price if order_type == "limit" and price > 0 else 0.0
-        base_qty = _convert_usdt_to_base_qty(client, symbol, usdt_amount, market_type, limit_price_for_conversion)
+        base_qty = usdt_amount if mt5_mode else _convert_usdt_to_base_qty(client, symbol, usdt_amount, market_type, limit_price_for_conversion)
 
         quote_for_buy = 0.0
-        if market_type == "spot":
+        if market_type == "spot" and not mt5_mode:
             from app.services.live_trading.spot_sizing import (
                 fetch_spot_last_price,
                 normalize_spot_base_quantity,
@@ -527,7 +532,9 @@ def place_order():
             # Convert side to signal_type: buy -> open_long, sell -> open_short (for swap) or close_long (for spot)
             from app.services.live_trading.execution import place_order_from_signal
             
-            if market_type == "spot":
+            if mt5_mode:
+                signal_type = "open_long" if side == "buy" else "open_short"
+            elif market_type == "spot":
                 # Spot: buy = open_long, sell = close_long (assuming we're closing a position)
                 signal_type = "open_long" if side == "buy" else "close_long"
             else:
@@ -682,6 +689,24 @@ def get_balance():
             return qt_rej
 
         def _compute_balance() -> Dict[str, Any]:
+            if is_mt5_exchange(exchange_id):
+                cfg = build_exchange_config(credential_id, user_id, {"market_type": "spot"})
+                client = create_exchange_client(cfg, market_type="spot")
+                parsed = fetch_balance_raw(
+                    client,
+                    exchange_id=exchange_id,
+                    market_type="spot",
+                    exchange_config=cfg,
+                )
+                return {
+                    "available": float(parsed.get("available") or 0),
+                    "total": float(parsed.get("total") or 0),
+                    "currency": str(parsed.get("currency") or "USD"),
+                    "market_type": "spot",
+                    "swap": empty_balance_dict(),
+                    "spot": parsed,
+                }
+
             swap_bal = empty_balance_dict()
             spot_bal = empty_balance_dict()
 
@@ -929,6 +954,9 @@ def _fetch_exchange_positions_raw(
 
     mt = (market_type or "swap").strip().lower()
 
+    if is_mt5_exchange(str(exchange_config.get("exchange_id") or "")) and hasattr(client, "get_positions"):
+        return client.get_positions(symbol=symbol)
+
     if mt == "spot" and isinstance(
         client, (BinanceSpotClient, BitgetSpotClient, OkxClient)
     ):
@@ -1093,6 +1121,10 @@ def get_position():
 
         exchange_config = build_exchange_config(credential_id, user_id, {"market_type": market_type})
         exchange_id_pos = (exchange_config.get("exchange_id") or "").strip().lower()
+        mt5_mode = is_mt5_exchange(exchange_id_pos)
+        if mt5_mode:
+            market_type = "spot"
+            exchange_config["market_type"] = market_type
         qt_rej = _reject_quick_trade_if_desktop_broker(exchange_id_pos)
         if qt_rej is not None:
             return qt_rej
@@ -1378,6 +1410,10 @@ def close_position():
         exchange_id = (exchange_config.get("exchange_id") or "").strip().lower()
         if not exchange_id:
             return jsonify({"code": 0, "msg": "Invalid credential: missing exchange_id"}), 400
+        mt5_mode = is_mt5_exchange(exchange_id)
+        if mt5_mode:
+            market_type = "spot"
+            exchange_config["market_type"] = market_type
 
         qt_rej = _reject_quick_trade_if_desktop_broker(exchange_id)
         if qt_rej is not None:
@@ -1472,7 +1508,7 @@ def close_position():
         if actual_close_size <= 0:
             return jsonify({"code": 0, "msg": "Close size is zero"}), 400
 
-        if market_type == "spot":
+        if market_type == "spot" and not mt5_mode:
             from app.services.live_trading.spot_sizing import clamp_spot_close_quantity
 
             adjusted, spot_meta = clamp_spot_close_quantity(
@@ -1496,7 +1532,14 @@ def close_position():
             actual_close_size = adjusted
         
         # ---- determine signal type based on position side ----
-        if market_type == "spot":
+        if mt5_mode:
+            if position_side == "long":
+                signal_type = "close_long"
+            elif position_side == "short":
+                signal_type = "close_short"
+            else:
+                return jsonify({"code": 0, "msg": f"Unknown position side: {position_side}"}), 400
+        elif market_type == "spot":
             # Spot only supports long positions
             if position_side != "long":
                 return jsonify({"code": 0, "msg": "Spot market only supports closing long positions"}), 400
@@ -1683,4 +1726,3 @@ def get_history():
 
 # openapi-compat: legacy import name
 quick_trade_bp = quick_trade_blp
-

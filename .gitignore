@@ -92,3 +92,9 @@ backend_api_python/data/memory/
 # Docker
 # ========================
 docker-compose.override.yml
+/CLAUDE.md
+.gitnexus
+.claude
+/AGENTS.md
+backend.env
+quantdinger-mt5-images*.tar

@@ -292,7 +292,7 @@ class StrategyService:
                 if not exchange_id:
                     return {'success': False, 'message': 'Missing exchange_id', 'data': None}
 
-                if exchange_id == "ibkr":
+                if exchange_id in ("ibkr", "mt5", "cptmarkets", "cpt_markets"):
                     from app.utils.local_brokers import desktop_broker_cloud_reject_message, local_desktop_brokers_allowed
 
                     if not local_desktop_brokers_allowed():
@@ -390,6 +390,43 @@ class StrategyService:
                             'success': False,
                             'message': f'Alpaca connection failed: {e}',
                             'data': {'exchange': safe_cfg}
+                        }
+
+                if exchange_id in ("mt5", "cptmarkets", "cpt_markets"):
+                    market_category_mt5 = str(
+                        resolved.get("market_category") or exchange_config.get("market_category") or ""
+                    ).strip()
+                    if market_category_mt5 and market_category_mt5 != "MT5":
+                        return {
+                            "success": False,
+                            "message": (
+                                f"MT5/CPT Markets supports market_category=MT5, "
+                                f"but got '{market_category_mt5}'."
+                            ),
+                            "data": {"exchange": safe_cfg},
+                        }
+                    try:
+                        from app.services.live_trading.factory import create_mt5_client
+
+                        mt5_client = create_mt5_client(resolved)
+                        account_summary = None
+                        try:
+                            account_summary = mt5_client.get_account_summary()
+                        except Exception:
+                            pass
+                        return {
+                            "success": True,
+                            "message": "MT5 connection successful",
+                            "data": {
+                                "exchange": safe_cfg,
+                                "account": account_summary,
+                            },
+                        }
+                    except Exception as e:
+                        return {
+                            "success": False,
+                            "message": f"MT5 connection failed: {e}",
+                            "data": {"exchange": safe_cfg},
                         }
 
                 # Best-effort detect current egress IP (for Binance IP whitelist debugging).

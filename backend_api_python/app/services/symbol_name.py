@@ -31,7 +31,7 @@ logger = get_logger(__name__)
 # Kept here as a local constant to avoid importing a routes module from a
 # service module (circular-import hazard).
 _CACHEABLE_MARKETS = frozenset({
-    'Crypto', 'USStock', 'CNStock', 'HKStock', 'Forex', 'Futures', 'MOEX',
+    'Crypto', 'USStock', 'CNStock', 'HKStock', 'Forex', 'MT5', 'Futures', 'MOEX',
 })
 
 
@@ -289,7 +289,7 @@ def resolve_symbol_name(market: str, symbol: str) -> Optional[str]:
             return base if base else None
         return s
 
-    if m == 'Forex':
+    if m in ('Forex', 'MT5'):
         return s
 
     if m == 'Futures':

@@ -26,6 +26,7 @@ _MARKETS = [
     {"value": "HKStock",  "label": "HK Stocks"},
     {"value": "Crypto",   "label": "Crypto"},
     {"value": "Forex",    "label": "Forex"},
+    {"value": "MT5",      "label": "MT5 / CPT Markets"},
     {"value": "Futures",  "label": "Futures"},
     {"value": "MOEX",     "label": "MOEX"},
 ]

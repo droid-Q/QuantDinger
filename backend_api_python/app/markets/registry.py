@@ -24,6 +24,7 @@ MARKET_ORDER = [
     "CNStock",
     "HKStock",
     "Forex",
+    "MT5",
     "Futures",
     "MOEX",
 ]
@@ -194,6 +195,25 @@ MARKET_MODULES: Dict[str, MarketModule] = {
             ),
         ],
         supports={"spot": False, "swap": False, "short": True, "session": "exchange-hours"},
+    ),
+    "MT5": MarketModule(
+        key="MT5",
+        label="MT5 / CPT Markets",
+        description="Broker-account symbols traded through a local MetaTrader 5 Terminal.",
+        asset_class="multi_asset",
+        symbol_hint="XAUUSD",
+        base_currency="USD",
+        features=["research", "live"],
+        data_requirements=[
+            DataRequirement(
+                key="mt5_terminal",
+                label="MetaTrader 5 Terminal",
+                setting_keys=["ALLOW_LOCAL_DESKTOP_BROKERS"],
+                required=True,
+                purpose="local quotes, account state, and order routing",
+            ),
+        ],
+        supports={"spot": True, "swap": False, "short": True, "session": "broker-hours"},
     ),
     "MOEX": MarketModule(
         key="MOEX",

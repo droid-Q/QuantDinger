@@ -35,6 +35,10 @@ IBKRConfig = None
 AlpacaClient = None
 AlpacaConfig = None
 
+# Lazy import MT5 to avoid ImportError on non-Windows hosts.
+MT5Client = None
+MT5Config = None
+
 
 def _get(cfg: Dict[str, Any], *keys: str) -> str:
     for k in keys:
@@ -263,6 +267,9 @@ def create_client(exchange_config: Dict[str, Any], *, market_type: str = "swap")
     if exchange_id == "alpaca":
         return create_alpaca_client(exchange_config)
 
+    if exchange_id in ("mt5", "cptmarkets", "cpt_markets"):
+        return create_mt5_client(exchange_config)
+
     raise LiveTradingError(f"Unsupported exchange_id: {exchange_id}")
 
 
@@ -388,6 +395,53 @@ def create_alpaca_client(exchange_config: Dict[str, Any]):
     return client
 
 
+def create_mt5_client(exchange_config: Dict[str, Any]):
+    """Create a MetaTrader 5 local terminal client."""
+    global MT5Client, MT5Config
+
+    if MT5Client is None or MT5Config is None:
+        try:
+            from app.services.mt5_trading import MT5Client as _MT5Client, MT5Config as _MT5Config
+
+            MT5Client = _MT5Client
+            MT5Config = _MT5Config
+        except ImportError as exc:
+            raise LiveTradingError(str(exc))
+
+    login_raw = _get(exchange_config, "mt5_login", "login", "account")
+    try:
+        login = int(login_raw or 0)
+    except (TypeError, ValueError):
+        login = 0
+    password = _get(exchange_config, "mt5_password", "password")
+    server = _get(exchange_config, "mt5_server", "server")
+    if not login or not password or not server:
+        raise LiveTradingError("MT5 requires mt5_login, mt5_password, and mt5_server")
+    try:
+        timeout = int(exchange_config.get("mt5_timeout") or exchange_config.get("timeout") or 60000)
+    except (TypeError, ValueError):
+        timeout = 60000
+
+    config = MT5Config(
+        login=login,
+        password=password,
+        server=server,
+        path=_get(exchange_config, "mt5_path", "path"),
+        timeout=timeout,
+        portable=str(exchange_config.get("mt5_portable") or "").strip().lower() in ("1", "true", "yes", "on"),
+        broker=_get(exchange_config, "broker") or "CPT Markets",
+        symbol_prefix=_get(exchange_config, "symbol_prefix", "symbolPrefix"),
+        symbol_suffix=_get(exchange_config, "symbol_suffix", "symbolSuffix"),
+    )
+    client = MT5Client(config)
+    if not client.connect():
+        raise LiveTradingError(
+            "Failed to connect to MT5 Terminal. Check that MT5 is installed/running "
+            "on this Windows host and that login/server/password are correct."
+        )
+    return client
+
+
 def query_fee_rate(
     exchange_config: Dict[str, Any],
     symbol: str,
@@ -403,5 +457,3 @@ def query_fee_rate(
     except Exception as e:
         logger.debug(f"query_fee_rate failed for {symbol}: {e}")
         return None
-
-

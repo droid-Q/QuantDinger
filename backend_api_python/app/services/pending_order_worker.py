@@ -1520,7 +1520,7 @@ class PendingOrderWorker:
         client_oid = make_client_order_id(exchange_id=exchange_id, strategy_id=strategy_id, order_id=order_id)
         sig = str(signal_type or "").strip().lower()
         # Spot does not support short signals in this system.
-        if market_type == "spot" and "short" in sig:
+        if market_type == "spot" and market_category != "MT5" and "short" in sig:
             self._mark_failed(order_id=order_id, error="spot_market_does_not_support_short_signals")
             _console_print(f"[worker] order rejected: strategy_id={strategy_id} pending_id={order_id} spot short not supported")
             _notify_live_best_effort(status="failed", error="spot_market_does_not_support_short_signals")

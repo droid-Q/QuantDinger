@@ -32,6 +32,9 @@ IBKRClient = None
 # Lazy import Alpaca
 AlpacaClient = None
 
+# Lazy import MT5
+MT5Client = None
+
 
 def _normalize_symbol_for_order(symbol: str, market_type: str = "swap") -> str:
     """
@@ -307,6 +310,24 @@ def place_order_from_signal(
             exchange_config=exchange_config,
         )
 
+    global MT5Client
+    if MT5Client is None:
+        try:
+            from app.services.mt5_trading import MT5Client as _MT5Client
+
+            MT5Client = _MT5Client
+        except ImportError:
+            pass
+
+    if MT5Client is not None and isinstance(client, MT5Client):
+        return _place_mt5_order(
+            client=client,
+            signal_type=signal_type,
+            symbol=symbol,
+            amount=qty,
+            client_order_id=client_order_id,
+        )
+
     raise LiveTradingError(f"Unsupported client type: {type(client)}")
 
 
@@ -413,6 +434,46 @@ def _place_alpaca_order(
         exchange_order_id=str(result.order_id) if result.order_id else "",
         filled=result.filled,
         avg_price=result.avg_price,
+        raw={
+            "status": result.status,
+            "message": result.message,
+            "raw": result.raw,
+        },
+    )
+
+
+def _place_mt5_order(
+    client,
+    *,
+    signal_type: str,
+    symbol: str,
+    amount: float,
+    client_order_id: Optional[str] = None,
+) -> LiveOrderResult:
+    """Place a market order via MT5. ``amount`` is MT5 volume/lots."""
+    sig = (signal_type or "").strip().lower()
+    if sig in ("open_long", "add_long", "close_short", "reduce_short", "close_short_stop", "close_short_profit", "close_short_trailing"):
+        action = "buy"
+    elif sig in ("open_short", "add_short", "close_long", "reduce_long", "close_long_stop", "close_long_profit", "close_long_trailing"):
+        action = "sell"
+    else:
+        raise LiveTradingError(f"Unsupported signal_type for MT5: {signal_type}")
+
+    result = client.place_market_order(
+        symbol=symbol,
+        side=action,
+        quantity=amount,
+        market_type="MT5",
+        client_order_id=client_order_id or "",
+        reduce_only=sig.startswith(("close_", "reduce_")),
+    )
+    if not result.success:
+        raise LiveTradingError(f"MT5 order failed: {result.message}")
+    return LiveOrderResult(
+        exchange_id="mt5",
+        exchange_order_id=str(result.order_id or ""),
+        filled=float(result.filled or 0.0),
+        avg_price=float(result.avg_price or 0.0),
         raw={
             "status": result.status,
             "message": result.message,

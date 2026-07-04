@@ -1,0 +1,175 @@
+# QuantDinger MT5 local-terminal stack
+#
+# Default mode uses locally loaded amd64 images:
+#
+#   docker compose -f docker-compose.mt5-local.yml up -d --build
+#
+# MT5 live trading still needs the official MetaTrader5 Python package, which
+# is Windows-only and talks to a local MetaTrader 5 Terminal. For real MT5
+# orders, run the backend on that Windows host and start only DB/Redis/UI:
+#
+#   cd backend_api_python
+#   pip install -r requirements.txt -r requirements-windows.txt
+#   set DATABASE_URL=postgresql://quantdinger:quantdinger123@127.0.0.1:5432/quantdinger
+#   set REDIS_HOST=127.0.0.1
+#   python run.py
+#
+#   BACKEND_URL=http://host.docker.internal:5000 docker compose -f docker-compose.mt5-local.yml up -d postgres redis frontend mobile
+#
+# Frontend/mobile images should be loaded first in offline Windows deployments:
+#   docker load -i quantdinger-mt5-images-20260704.tar
+#
+# Mobile keeps using the published image by default because this checkout does
+# not include a local mobile source tree.
+
+services:
+  postgres:
+    image: ${POSTGRES_IMAGE:-${IMAGE_PREFIX:-}postgres:18.3-alpine}
+    platform: ${DOCKER_PLATFORM:-linux/amd64}
+    container_name: quantdinger-mt5-db
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-quantdinger}
+      POSTGRES_USER: ${POSTGRES_USER:-quantdinger}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-quantdinger123}
+      PGDATA: ${POSTGRES_PGDATA:-/var/lib/postgresql/18/docker}
+      TZ: ${TZ:-Asia/Shanghai}
+    command:
+      - "postgres"
+      - "-c"
+      - "max_connections=${PG_MAX_CONNECTIONS:-150}"
+      - "-c"
+      - "shared_buffers=${PG_SHARED_BUFFERS:-256MB}"
+    volumes:
+      - ${POSTGRES_DATA_SOURCE:-postgres_mt5_data}:${POSTGRES_PGDATA:-/var/lib/postgresql/18/docker}
+      - ./backend_api_python/migrations/init.sql:/docker-entrypoint-initdb.d/01-init.sql
+    ports:
+      - "${DB_PORT:-127.0.0.1:5432}:5432"
+    networks:
+      - quantdinger-mt5-network
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-quantdinger} -d ${POSTGRES_DB:-quantdinger}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  redis:
+    image: ${IMAGE_PREFIX:-}redis:7-alpine
+    platform: ${DOCKER_PLATFORM:-linux/amd64}
+    container_name: quantdinger-mt5-redis
+    restart: unless-stopped
+    command: ["redis-server", "--maxmemory", "128mb", "--maxmemory-policy", "allkeys-lru"]
+    ports:
+      - "${REDIS_PORT:-127.0.0.1:6379}:6379"
+    networks:
+      - quantdinger-mt5-network
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  backend:
+    image: ${BACKEND_IMAGE:-quantdinger-backend}:${BACKEND_TAG:-${IMAGE_TAG:-latest}}
+    platform: ${DOCKER_PLATFORM:-linux/amd64}
+    pull_policy: missing
+    container_name: quantdinger-mt5-backend
+    restart: unless-stopped
+    ulimits:
+      nofile:
+        soft: 65535
+        hard: 65535
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    ports:
+      - "${BACKEND_PORT:-127.0.0.1:5000}:5000"
+    volumes:
+      - backend_mt5_logs:/app/logs
+      - backend_mt5_data:/app/data
+      - ./backend_api_python/.env:/app/.env
+    environment:
+      - PYTHON_API_HOST=0.0.0.0
+      - PYTHON_API_PORT=5000
+      - GIT_TAG=${GIT_TAG:-${IMAGE_TAG:-}}
+      - TZ=${TZ:-Asia/Shanghai}
+      - DATABASE_URL=postgresql://${POSTGRES_USER:-quantdinger}:${POSTGRES_PASSWORD:-quantdinger123}@postgres:5432/${POSTGRES_DB:-quantdinger}
+      - DB_TYPE=postgresql
+      - REDIS_HOST=redis
+      - REDIS_PORT=6379
+      - CACHE_ENABLED=true
+      - DB_POOL_MIN=${DB_POOL_MIN:-5}
+      - DB_POOL_MAX=${DB_POOL_MAX:-50}
+      - DB_POOL_ACQUIRE_TIMEOUT=${DB_POOL_ACQUIRE_TIMEOUT:-10}
+      - DB_POOL_HEALTH_CHECK=${DB_POOL_HEALTH_CHECK:-true}
+      - MARKET_EXECUTOR_WORKERS=${MARKET_EXECUTOR_WORKERS:-6}
+      - PORTFOLIO_EXECUTOR_WORKERS=${PORTFOLIO_EXECUTOR_WORKERS:-3}
+      - RESOURCE_FD_COOLDOWN_SEC=${RESOURCE_FD_COOLDOWN_SEC:-180}
+      - PORTFOLIO_MONITOR_DUE_BATCH_LIMIT=${PORTFOLIO_MONITOR_DUE_BATCH_LIMIT:-5}
+      - GUNICORN_WORKERS=${GUNICORN_WORKERS:-1}
+      - GUNICORN_THREADS=${GUNICORN_THREADS:-8}
+      - ALLOW_LOCAL_DESKTOP_BROKERS=${ALLOW_LOCAL_DESKTOP_BROKERS:-true}
+      - SPOT_CLOSE_SAFETY_RATIO=${SPOT_CLOSE_SAFETY_RATIO:-0.998}
+      - SPOT_OPEN_QUOTE_BUFFER=${SPOT_OPEN_QUOTE_BUFFER:-0.995}
+      - FRONTEND_URL=${FRONTEND_URL:-http://localhost:8888,http://localhost:8889}
+    networks:
+      - quantdinger-mt5-network
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:5000/api/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  frontend:
+    image: ${FRONTEND_IMAGE:-ghcr.io/brokermr810/quantdinger-frontend}:${FRONTEND_TAG:-${IMAGE_TAG:-latest}}
+    platform: ${DOCKER_PLATFORM:-linux/amd64}
+    pull_policy: missing
+    container_name: quantdinger-mt5-frontend
+    restart: unless-stopped
+    ports:
+      - "${FRONTEND_PORT:-8888}:80"
+    environment:
+      - BACKEND_URL=${BACKEND_URL:-http://backend:5000}
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    networks:
+      - quantdinger-mt5-network
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  mobile:
+    image: ${MOBILE_IMAGE:-ghcr.io/brokermr810/quantdinger-mobile}:${MOBILE_TAG:-${IMAGE_TAG:-latest}}
+    platform: ${DOCKER_PLATFORM:-linux/amd64}
+    pull_policy: missing
+    container_name: quantdinger-mt5-mobile
+    restart: unless-stopped
+    ports:
+      - "${MOBILE_PORT:-8889}:80"
+    environment:
+      - BACKEND_URL=${BACKEND_URL:-http://backend:5000}
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    networks:
+      - quantdinger-mt5-network
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+volumes:
+  postgres_mt5_data:
+    driver: local
+  backend_mt5_logs:
+    driver: local
+  backend_mt5_data:
+    driver: local
+
+networks:
+  quantdinger-mt5-network:
+    driver: bridge

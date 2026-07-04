@@ -48,6 +48,9 @@ def _safe_json_loads(value: Any, default: Any) -> Any:
 _EXCHANGE_TO_MARKET: Dict[str, str] = {
     "ibkr": "USStock",
     "alpaca": "USStock",  # Alpaca primarily for US stocks; crypto is opt-in via market_category override
+    "mt5": "MT5",
+    "cptmarkets": "MT5",
+    "cpt_markets": "MT5",
 }
 _CRYPTO_EXCHANGES = supported_crypto_exchange_ids()
 
@@ -82,7 +85,7 @@ def safe_exchange_config_for_log(cfg: Dict[str, Any]) -> Dict[str, Any]:
     if not isinstance(cfg, dict):
         return {}
     out = dict(cfg)
-    for k in ["api_key", "secret_key", "passphrase", "apiKey", "secret", "password"]:
+    for k in ["api_key", "secret_key", "passphrase", "apiKey", "secret", "password", "mt5_password"]:
         if k in out and out.get(k):
             out[k] = mask_secret(str(out.get(k)))
     return out
@@ -255,5 +258,4 @@ def coalesce_exchange_config_from_payload(payload: Dict[str, Any]) -> Dict[str, 
             ex_cfg["credential_id"] = cred
 
     return ex_cfg
-
 

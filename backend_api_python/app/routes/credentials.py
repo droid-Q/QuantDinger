@@ -149,7 +149,7 @@ def create_credential():
         if not exchange_id:
             return jsonify({'code': 0, 'msg': 'Missing exchange_id', 'data': None}), 400
 
-        if exchange_id == 'ibkr':
+        if exchange_id in ('ibkr', 'mt5', 'cptmarkets', 'cpt_markets'):
             from app.utils.local_brokers import desktop_broker_cloud_reject_message, local_desktop_brokers_allowed
 
             if not local_desktop_brokers_allowed():
@@ -195,6 +195,33 @@ def create_credential():
                 'ibkr_account': (data.get('ibkr_account') or '').strip()
             })
             hint = f"{config['ibkr_host']}:{config['ibkr_port']}"
+        elif exchange_id in ('mt5', 'cptmarkets', 'cpt_markets'):
+            mt5_login = str(data.get('mt5_login') or data.get('login') or data.get('account') or '').strip()
+            mt5_password = str(data.get('mt5_password') or data.get('password') or '').strip()
+            mt5_server = str(data.get('mt5_server') or data.get('server') or '').strip()
+            if not mt5_login or not mt5_password or not mt5_server:
+                return jsonify({'code': 0, 'msg': 'Missing mt5_login/mt5_password/mt5_server', 'data': None}), 400
+
+            try:
+                mt5_timeout = int(data.get('mt5_timeout') or data.get('timeout') or 60000)
+            except (TypeError, ValueError):
+                mt5_timeout = 60000
+            store_exchange_id = 'cptmarkets' if exchange_id in ('cptmarkets', 'cpt_markets') else 'mt5'
+            exchange_id = store_exchange_id
+            config.update({
+                'exchange_id': store_exchange_id,
+                'broker': 'CPT Markets' if store_exchange_id == 'cptmarkets' else (data.get('broker') or 'MetaTrader 5'),
+                'mt5_login': mt5_login,
+                'mt5_password': mt5_password,
+                'mt5_server': mt5_server,
+                'mt5_path': str(data.get('mt5_path') or data.get('path') or '').strip(),
+                'mt5_timeout': mt5_timeout,
+                'market_category': 'MT5',
+                'market_type': 'spot',
+                'symbol_prefix': str(data.get('symbol_prefix') or data.get('symbolPrefix') or '').strip(),
+                'symbol_suffix': str(data.get('symbol_suffix') or data.get('symbolSuffix') or '').strip(),
+            })
+            hint = f"{mt5_login}@{mt5_server}"
         elif exchange_id in CRYPTO_EXCHANGES:
             # Crypto exchanges
             api_key = (data.get('api_key') or '').strip()

@@ -2101,6 +2101,7 @@ class TradingExecutor:
             klines = self._fetch_latest_kline(
                 symbol, timeframe, limit=history_limit, market_category=market_category,
                 exchange_id=kline_exchange_id, market_type=kline_market_type,
+                exchange=exchange,
             )
             if not klines or len(klines) < 2:
                 _abort_loop(f"failed to fetch K-lines for {market_category}:{symbol} {timeframe} via {kline_exchange_id or 'default'}/{kline_market_type or 'default'} (need at least 2 bars)")
@@ -2381,6 +2382,7 @@ class TradingExecutor:
                         klines = self._fetch_latest_kline(
                             symbol, timeframe, limit=history_limit, market_category=market_category,
                             exchange_id=kline_exchange_id, market_type=kline_market_type,
+                            exchange=exchange,
                         )
                         try:
                             if klines and len(klines) >= 2:
@@ -3293,9 +3295,12 @@ class TradingExecutor:
         market_category: str = "Crypto",
         exchange_id: Optional[str] = None,
         market_type: Optional[str] = None,
+        exchange: Any = None,
     ) -> List[Dict[str, Any]]:
         """Fetch latest K-line data, preferring the service cache when available."""
         try:
+            if (market_category or "").strip() == "MT5" and exchange is not None and hasattr(exchange, "get_kline"):
+                return exchange.get_kline(symbol, timeframe, limit)
             return self.kline_service.get_kline(
                 market=market_category,
                 symbol=symbol,
@@ -3345,6 +3350,11 @@ class TradingExecutor:
                 pass
             
         try:
+            if (market_category or "").strip() == "MT5" and exchange is not None and hasattr(exchange, "get_ticker"):
+                ticker = exchange.get_ticker(symbol)
+                price = float(ticker.get("last") or ticker.get("close") or 0)
+                if price > 0:
+                    return price
             ticker = DataSourceFactory.get_ticker(
                 market_category, symbol, exchange_id=exchange_id, market_type=kline_market_type or market_type
             )

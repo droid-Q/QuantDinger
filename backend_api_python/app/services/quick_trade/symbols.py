@@ -16,10 +16,22 @@ CRYPTO_EXCHANGES = {
     "htx",
 }
 
+MT5_EXCHANGES = {"mt5", "cptmarkets", "cpt_markets"}
+
 
 def is_supported_crypto_exchange(exchange_id: str) -> bool:
     """Return whether Quick Trade supports this exchange id."""
     return (exchange_id or "").strip().lower() in CRYPTO_EXCHANGES
+
+
+def is_supported_quick_trade_exchange(exchange_id: str) -> bool:
+    """Return whether Quick Trade can route this exchange id."""
+    ex = (exchange_id or "").strip().lower()
+    return ex in CRYPTO_EXCHANGES or ex in MT5_EXCHANGES
+
+
+def is_mt5_exchange(exchange_id: str) -> bool:
+    return (exchange_id or "").strip().lower() in MT5_EXCHANGES
 
 
 def symbols_match(user_symbol: str, position_symbol: str) -> bool:
