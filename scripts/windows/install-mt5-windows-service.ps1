@@ -8,6 +8,7 @@ param(
     [int]$MobilePort = 8889,
     [string]$NssmPath = "",
     [string]$PipIndexUrl = "https://mirrors.aliyun.com/pypi/simple/",
+    [string]$PythonVersion = "3.12",
     [switch]$DockerOnly,
     [switch]$SkipPipInstall,
     [switch]$RunAsLocalSystem
@@ -138,15 +139,30 @@ function Prepare-Env {
 function Prepare-Python {
     if (-not (Test-Path $VenvPython)) {
         if (Get-Command py -ErrorAction SilentlyContinue) {
-            py -3 -m venv $VenvDir
+            py "-$PythonVersion" -m venv $VenvDir
         } elseif (Get-Command python -ErrorAction SilentlyContinue) {
             python -m venv $VenvDir
         } else {
             Fail "Python 3 is not installed or not in PATH."
         }
     }
+    $versionLine = & $VenvPython -c "import sys; print(f'{sys.version_info.major}.{sys.version_info.minor}')" 2>$null
+    if ($LASTEXITCODE -ne 0) { Fail "Cannot run venv Python: $VenvPython" }
+    $parts = "$versionLine".Trim().Split(".")
+    $major = [int]$parts[0]
+    $minor = [int]$parts[1]
+    if ($major -ne 3 -or $minor -gt 12) {
+        Write-Host "Recreating venv: Python $versionLine is too new for pandas/numpy/MetaTrader5 wheels." -ForegroundColor Yellow
+        Remove-Item -Recurse -Force $VenvDir
+        if (-not (Get-Command py -ErrorAction SilentlyContinue)) {
+            Fail "Install Python $PythonVersion and make sure the Windows py launcher is available."
+        }
+        py "-$PythonVersion" -m venv $VenvDir
+        $versionLine = & $VenvPython -c "import sys; print(f'{sys.version_info.major}.{sys.version_info.minor}')"
+        if ("$versionLine".Trim() -ne $PythonVersion) { Fail "Expected Python $PythonVersion, got $versionLine." }
+    }
     if (-not $SkipPipInstall) {
-        $pipIndexArgs = @("--index-url", $PipIndexUrl)
+        $pipIndexArgs = @("--index-url", $PipIndexUrl, "--only-binary", ":all:")
         & $VenvPython -m pip install @pipIndexArgs --upgrade pip
         & $VenvPython -m pip install @pipIndexArgs -r (Join-Path $BackendDir "requirements.txt") -r (Join-Path $BackendDir "requirements-windows.txt")
     }
