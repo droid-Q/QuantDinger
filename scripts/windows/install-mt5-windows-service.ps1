@@ -186,20 +186,20 @@ function Install-BackendService {
             Stop-Service -Name $ServiceName -Force -ErrorAction SilentlyContinue
             $existingService.WaitForStatus("Stopped", [TimeSpan]::FromSeconds(30))
         }
-        Invoke-Nssm $nssm @("remove", $ServiceName, "confirm")
+        Invoke-Nssm $nssm "remove" $ServiceName "confirm"
     }
 
-    Invoke-Nssm $nssm @("install", $ServiceName, $VenvPython, "run.py")
-    Invoke-Nssm $nssm @("set", $ServiceName, "AppDirectory", $BackendDir)
-    Invoke-Nssm $nssm @("set", $ServiceName, "AppStdout", (Join-Path $LogsDir "windows-service.out.log"))
-    Invoke-Nssm $nssm @("set", $ServiceName, "AppStderr", (Join-Path $LogsDir "windows-service.err.log"))
-    Invoke-Nssm $nssm @("set", $ServiceName, "AppRotateFiles", "1")
-    Invoke-Nssm $nssm @("set", $ServiceName, "AppRotateOnline", "1")
-    Invoke-Nssm $nssm @("set", $ServiceName, "AppRotateBytes", "10485760")
-    Invoke-Nssm $nssm @("set", $ServiceName, "AppEnvironmentExtra", "PYTHONUTF8=1", "PYTHONUNBUFFERED=1")
-    Invoke-Nssm $nssm @("set", $ServiceName, "AppExit", "Default", "Restart")
-    Invoke-Nssm $nssm @("set", $ServiceName, "AppRestartDelay", "5000")
-    Invoke-Nssm $nssm @("set", $ServiceName, "Start", "SERVICE_AUTO_START")
+    Invoke-Nssm $nssm "install" $ServiceName $VenvPython "run.py"
+    Invoke-Nssm $nssm "set" $ServiceName "AppDirectory" $BackendDir
+    Invoke-Nssm $nssm "set" $ServiceName "AppStdout" (Join-Path $LogsDir "windows-service.out.log")
+    Invoke-Nssm $nssm "set" $ServiceName "AppStderr" (Join-Path $LogsDir "windows-service.err.log")
+    Invoke-Nssm $nssm "set" $ServiceName "AppRotateFiles" "1"
+    Invoke-Nssm $nssm "set" $ServiceName "AppRotateOnline" "1"
+    Invoke-Nssm $nssm "set" $ServiceName "AppRotateBytes" "10485760"
+    Invoke-Nssm $nssm "set" $ServiceName "AppEnvironmentExtra" "PYTHONUTF8=1" "PYTHONUNBUFFERED=1"
+    Invoke-Nssm $nssm "set" $ServiceName "AppExit" "Default" "Restart"
+    Invoke-Nssm $nssm "set" $ServiceName "AppRestartDelay" "5000"
+    Invoke-Nssm $nssm "set" $ServiceName "Start" "SERVICE_AUTO_START"
 
     if (-not $RunAsLocalSystem) {
         $defaultUser = "$env:USERDOMAIN\$env:USERNAME"
@@ -209,13 +209,13 @@ function Install-BackendService {
         $ptr = [Runtime.InteropServices.Marshal]::SecureStringToBSTR($secure)
         try {
             $plain = [Runtime.InteropServices.Marshal]::PtrToStringBSTR($ptr)
-            if ($plain) { Invoke-Nssm $nssm @("set", $ServiceName, "ObjectName", $serviceUser, $plain) }
+            if ($plain) { Invoke-Nssm $nssm "set" $ServiceName "ObjectName" $serviceUser $plain }
         } finally {
             [Runtime.InteropServices.Marshal]::ZeroFreeBSTR($ptr)
         }
     }
 
-    Invoke-Nssm $nssm @("start", $ServiceName)
+    Invoke-Nssm $nssm "start" $ServiceName
 }
 
 function Register-DockerStartupTask {
