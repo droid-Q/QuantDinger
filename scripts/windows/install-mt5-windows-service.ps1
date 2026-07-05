@@ -166,9 +166,11 @@ function Prepare-Python {
         if ("$versionLine".Trim() -ne $PythonVersion) { Fail "Expected Python $PythonVersion, got $versionLine." }
     }
     if (-not $SkipPipInstall) {
-        $pipIndexArgs = @("--index-url", $PipIndexUrl, "--only-binary", ":all:")
+        $pipIndexArgs = @("--index-url", $PipIndexUrl, "--only-binary", "pandas,numpy,MetaTrader5")
         & $VenvPython -m pip install @pipIndexArgs --upgrade pip
+        if ($LASTEXITCODE -ne 0) { Fail "pip upgrade failed." }
         & $VenvPython -m pip install @pipIndexArgs -r (Join-Path $BackendDir "requirements.txt") -r (Join-Path $BackendDir "requirements-windows.txt")
+        if ($LASTEXITCODE -ne 0) { Fail "pip install failed." }
     }
     & $VenvPython -c "import MetaTrader5 as mt5; print('MetaTrader5', mt5.__version__)"
     if ($LASTEXITCODE -ne 0) { Fail "MetaTrader5 import failed in $VenvPython." }
