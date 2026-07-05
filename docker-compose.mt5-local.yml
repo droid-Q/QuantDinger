@@ -131,7 +131,7 @@ services:
     ports:
       - "${FRONTEND_PORT:-8888}:80"
     environment:
-      - BACKEND_URL=${BACKEND_URL:-http://backend:5000}
+      - BACKEND_URL=${BACKEND_URL:-http://host.docker.internal:5000}
     extra_hosts:
       - "host.docker.internal:host-gateway"
     networks:
@@ -151,7 +151,7 @@ services:
     ports:
       - "${MOBILE_PORT:-8889}:80"
     environment:
-      - BACKEND_URL=${BACKEND_URL:-http://backend:5000}
+      - BACKEND_URL=${BACKEND_URL:-http://host.docker.internal:5000}
     extra_hosts:
       - "host.docker.internal:host-gateway"
     networks:

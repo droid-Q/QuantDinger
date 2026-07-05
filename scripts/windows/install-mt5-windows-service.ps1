@@ -82,7 +82,8 @@ function Start-DockerServices {
     Push-Location $ProjectRoot
     try {
         docker compose -f $ComposeFile stop backend *> $null
-        docker compose -f $ComposeFile up -d postgres redis frontend mobile
+        docker compose -f $ComposeFile up -d postgres redis
+        docker compose -f $ComposeFile up -d --force-recreate frontend mobile
     } finally {
         Pop-Location
     }
