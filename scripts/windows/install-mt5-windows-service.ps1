@@ -137,14 +137,21 @@ function Prepare-Env {
 }
 
 function Prepare-Python {
-    if (-not (Test-Path $VenvPython)) {
+    function New-Venv {
         if (Get-Command py -ErrorAction SilentlyContinue) {
             py "-$PythonVersion" -m venv $VenvDir
         } elseif (Get-Command python -ErrorAction SilentlyContinue) {
             python -m venv $VenvDir
         } else {
-            Fail "Python 3 is not installed or not in PATH."
+            Fail "Python $PythonVersion is required. Install it with: winget install -e --id Python.Python.3.12"
         }
+        if ($LASTEXITCODE -ne 0 -or -not (Test-Path $VenvPython)) {
+            Fail "Python $PythonVersion is required. Install it with: winget install -e --id Python.Python.3.12"
+        }
+    }
+
+    if (-not (Test-Path $VenvPython)) {
+        New-Venv
     }
     $versionLine = & $VenvPython -c "import sys; print(f'{sys.version_info.major}.{sys.version_info.minor}')" 2>$null
     if ($LASTEXITCODE -ne 0) { Fail "Cannot run venv Python: $VenvPython" }
@@ -154,10 +161,7 @@ function Prepare-Python {
     if ($major -ne 3 -or $minor -gt 12) {
         Write-Host "Recreating venv: Python $versionLine is too new for pandas/numpy/MetaTrader5 wheels." -ForegroundColor Yellow
         Remove-Item -Recurse -Force $VenvDir
-        if (-not (Get-Command py -ErrorAction SilentlyContinue)) {
-            Fail "Install Python $PythonVersion and make sure the Windows py launcher is available."
-        }
-        py "-$PythonVersion" -m venv $VenvDir
+        New-Venv
         $versionLine = & $VenvPython -c "import sys; print(f'{sys.version_info.major}.{sys.version_info.minor}')"
         if ("$versionLine".Trim() -ne $PythonVersion) { Fail "Expected Python $PythonVersion, got $versionLine." }
     }
