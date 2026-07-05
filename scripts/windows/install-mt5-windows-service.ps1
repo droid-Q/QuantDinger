@@ -7,6 +7,7 @@ param(
     [int]$FrontendPort = 8888,
     [int]$MobilePort = 8889,
     [string]$NssmPath = "",
+    [string]$PipIndexUrl = "https://mirrors.aliyun.com/pypi/simple/",
     [switch]$DockerOnly,
     [switch]$SkipPipInstall,
     [switch]$RunAsLocalSystem
@@ -145,8 +146,9 @@ function Prepare-Python {
         }
     }
     if (-not $SkipPipInstall) {
-        & $VenvPython -m pip install --upgrade pip
-        & $VenvPython -m pip install -r (Join-Path $BackendDir "requirements.txt") -r (Join-Path $BackendDir "requirements-windows.txt")
+        $pipIndexArgs = @("--index-url", $PipIndexUrl)
+        & $VenvPython -m pip install @pipIndexArgs --upgrade pip
+        & $VenvPython -m pip install @pipIndexArgs -r (Join-Path $BackendDir "requirements.txt") -r (Join-Path $BackendDir "requirements-windows.txt")
     }
     & $VenvPython -c "import MetaTrader5 as mt5; print('MetaTrader5', mt5.__version__)"
     if ($LASTEXITCODE -ne 0) { Fail "MetaTrader5 import failed in $VenvPython." }
