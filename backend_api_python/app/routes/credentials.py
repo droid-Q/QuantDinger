@@ -216,7 +216,7 @@ def create_credential():
                 'mt5_server': mt5_server,
                 'mt5_path': str(data.get('mt5_path') or data.get('path') or '').strip(),
                 'mt5_timeout': mt5_timeout,
-                'market_category': 'MT5',
+                'market_category': 'Forex',
                 'market_type': 'spot',
                 'symbol_prefix': str(data.get('symbol_prefix') or data.get('symbolPrefix') or '').strip(),
                 'symbol_suffix': str(data.get('symbol_suffix') or data.get('symbolSuffix') or '').strip(),

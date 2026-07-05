@@ -37,6 +37,8 @@ from app.utils.safe_exec import TimeoutError as SafeExecTimeoutError, timeout_co
 
 logger = get_logger(__name__)
 
+MT5_EXCHANGES = {"mt5", "cptmarkets", "cpt_markets"}
+
 
 class ScriptCallbackTimeout(RuntimeError):
     """Raised when user script callbacks exceed the live runtime budget."""
@@ -3299,7 +3301,7 @@ class TradingExecutor:
     ) -> List[Dict[str, Any]]:
         """Fetch latest K-line data, preferring the service cache when available."""
         try:
-            if (market_category or "").strip() == "MT5" and exchange is not None and hasattr(exchange, "get_kline"):
+            if (exchange_id or "").strip().lower() in MT5_EXCHANGES and exchange is not None and hasattr(exchange, "get_kline"):
                 return exchange.get_kline(symbol, timeframe, limit)
             return self.kline_service.get_kline(
                 market=market_category,
@@ -3350,7 +3352,7 @@ class TradingExecutor:
                 pass
             
         try:
-            if (market_category or "").strip() == "MT5" and exchange is not None and hasattr(exchange, "get_ticker"):
+            if (exchange_id or "").strip().lower() in MT5_EXCHANGES and exchange is not None and hasattr(exchange, "get_ticker"):
                 ticker = exchange.get_ticker(symbol)
                 price = float(ticker.get("last") or ticker.get("close") or 0)
                 if price > 0:

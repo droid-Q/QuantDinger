@@ -49,7 +49,7 @@ class TestHelpers:
         assert is_compatible_credential("alpaca", "Crypto") is True
         assert is_compatible_credential("alpaca", "USStock") is True
         assert is_compatible_credential("binance", "Crypto") is True
-        assert is_compatible_credential("cptmarkets", "MT5") is True
+        assert is_compatible_credential("cptmarkets", "Forex") is True
 
     def test_is_compatible_credential_mismatch(self):
         assert is_compatible_credential("ibkr", "Crypto") is False
@@ -72,7 +72,7 @@ class TestHelpers:
         assert allowed_market_types("alpaca", "Crypto") == {"spot"}
         assert allowed_market_types("alpaca", "USStock") == {"spot"}
         assert allowed_market_types("ibkr", "USStock") == {"spot"}
-        assert allowed_market_types("cptmarkets", "MT5") == {"spot"}
+        assert allowed_market_types("cptmarkets", "Forex") == {"spot"}
 
     def test_allowed_market_types_invalid_combo(self):
         # Returns empty set rather than raising — caller decides how to react.
@@ -81,18 +81,18 @@ class TestHelpers:
     def test_allowed_bot_types_per_market(self):
         # Crypto: every bot type is supported.
         assert allowed_bot_types("Crypto") == {"grid", "martingale", "dca", "trend"}
-        assert allowed_bot_types("Forex") == set()
+        assert allowed_bot_types("Forex") == {"dca", "trend"}
         # USStock: no grid (overnight gaps), no martingale.
         assert allowed_bot_types("USStock") == {"dca", "trend"}
-        assert allowed_bot_types("MT5") == {"dca", "trend"}
+        assert allowed_bot_types("MT5") == set()
 
     def test_list_supported_brokers_for_market(self):
         usstock_brokers = list_supported_brokers_for_market("USStock")
         assert "ibkr" in usstock_brokers
         assert "alpaca" in usstock_brokers
         assert "binance" not in usstock_brokers
-        assert list_supported_brokers_for_market("Forex") == set()
-        assert "cptmarkets" in list_supported_brokers_for_market("MT5")
+        assert "cptmarkets" in list_supported_brokers_for_market("Forex")
+        assert list_supported_brokers_for_market("MT5") == set()
 
 
 # ---------------------------------------------------------------------------
@@ -120,7 +120,7 @@ class TestValidateLegalCombos:
         # IBKR US stocks
         ("ibkr", "USStock", "spot", "long"),
         # MT5 terminal brokers
-        ("cptmarkets", "MT5", "spot", "short"),
+        ("cptmarkets", "Forex", "spot", "short"),
     ])
     def test_valid_strategy_combo_raises_nothing(
         self, exchange_id, market_category, market_type, trade_direction
@@ -276,9 +276,9 @@ class TestBotTypeRules:
         ("martingale", "Crypto"),
         ("dca", "Crypto"),
         ("dca", "USStock"),
-        ("dca", "MT5"),
+        ("dca", "Forex"),
         ("trend", "USStock"),
-        ("trend", "MT5"),
+        ("trend", "Forex"),
     ])
     def test_valid_bot_market_pair(self, bot_type, market_category):
         # Combine with a broker that supports the market.
@@ -306,8 +306,8 @@ class TestBotTypeRules:
                 bot_type="grid",
             )
 
-    def test_forex_live_trading_rejected(self):
-        with pytest.raises(ValueError, match="not supported for live trading"):
+    def test_binance_forex_rejected(self):
+        with pytest.raises(ValueError, match="cannot trade"):
             validate_strategy_config(
                 exchange_id="binance",
                 market_category="Forex",
@@ -364,11 +364,11 @@ class TestToDictSnapshot:
         bot_markets = to_dict()["bot_type_markets"]
         assert sorted(bot_markets["grid"]) == ["Crypto"]
         assert sorted(bot_markets["martingale"]) == ["Crypto"]
-        assert sorted(bot_markets["dca"]) == ["Crypto", "MT5", "USStock"]
-        assert sorted(bot_markets["trend"]) == ["Crypto", "MT5", "USStock"]
+        assert sorted(bot_markets["dca"]) == ["Crypto", "Forex", "USStock"]
+        assert sorted(bot_markets["trend"]) == ["Crypto", "Forex", "USStock"]
 
     def test_live_market_categories_serialized(self):
-        assert sorted(to_dict()["live_market_categories"]) == ["Crypto", "MT5", "USStock"]
+        assert sorted(to_dict()["live_market_categories"]) == ["Crypto", "Forex", "USStock"]
 
     def test_matrix_internal_consistency(self):
         # Every long-only broker must be present in BROKER_MARKETS.

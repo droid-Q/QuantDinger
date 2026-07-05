@@ -396,11 +396,11 @@ class StrategyService:
                     market_category_mt5 = str(
                         resolved.get("market_category") or exchange_config.get("market_category") or ""
                     ).strip()
-                    if market_category_mt5 and market_category_mt5 != "MT5":
+                    if market_category_mt5 and market_category_mt5 != "Forex":
                         return {
                             "success": False,
                             "message": (
-                                f"MT5/CPT Markets supports market_category=MT5, "
+                                f"MT5/CPT Markets supports market_category=Forex, "
                                 f"but got '{market_category_mt5}'."
                             ),
                             "data": {"exchange": safe_cfg},
