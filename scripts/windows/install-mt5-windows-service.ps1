@@ -108,9 +108,9 @@ function Resolve-Nssm {
     return $exe
 }
 
-function Invoke-Nssm($Nssm, [string[]]$Args) {
-    & $Nssm @Args
-    if ($LASTEXITCODE -ne 0) { Fail "nssm $($Args -join ' ') failed." }
+function Invoke-Nssm([string]$Nssm, [Parameter(ValueFromRemainingArguments=$true)][string[]]$NssmArgs) {
+    & $Nssm @NssmArgs
+    if ($LASTEXITCODE -ne 0) { Fail "nssm $($NssmArgs -join ' ') failed." }
 }
 
 function Prepare-Env {
