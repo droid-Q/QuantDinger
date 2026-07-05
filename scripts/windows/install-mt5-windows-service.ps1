@@ -180,10 +180,13 @@ function Install-BackendService {
     $nssm = Resolve-Nssm
     New-Item -ItemType Directory -Force -Path $LogsDir | Out-Null
 
-    & $nssm status $ServiceName *> $null
-    if ($LASTEXITCODE -eq 0) {
-        & $nssm stop $ServiceName *> $null
-        & $nssm remove $ServiceName confirm *> $null
+    $existingService = Get-Service -Name $ServiceName -ErrorAction SilentlyContinue
+    if ($existingService) {
+        if ($existingService.Status -ne "Stopped") {
+            Stop-Service -Name $ServiceName -Force -ErrorAction SilentlyContinue
+            $existingService.WaitForStatus("Stopped", [TimeSpan]::FromSeconds(30))
+        }
+        Invoke-Nssm $nssm @("remove", $ServiceName, "confirm")
     }
 
     Invoke-Nssm $nssm @("install", $ServiceName, $VenvPython, "run.py")
