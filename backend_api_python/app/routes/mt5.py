@@ -190,7 +190,11 @@ def get_status():
                 })
             return jsonify({"success": True, "data": data})
         data = client.get_connection_status()
-        saved = _load_saved_mt5_config(int(getattr(g, "user_id", 1) or 1))
+        user_id = int(getattr(g, "user_id", 1) or 1)
+        saved = _load_saved_mt5_config(user_id)
+        cfg = getattr(client, "config", None)
+        if not saved and cfg and cfg.login and cfg.password and cfg.server:
+            saved = {"credential_id": _save_or_update_mt5_credential(user_id, cfg)}
         if saved:
             data["credential_id"] = saved.get("credential_id") or 0
             data["saved"] = True
