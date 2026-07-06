@@ -93,6 +93,17 @@ def test_live_crypto_kline_params_usstock_unchanged():
     assert mt is None
 
 
+def test_live_crypto_kline_params_forex_mt5_uses_bound_exchange():
+    ex, mt = TradingExecutor._live_crypto_kline_params(
+        market_category="Forex",
+        market_type="spot",
+        execution_mode="live",
+        exchange_config={"exchange_id": "cptmarkets"},
+    )
+    assert ex == "cptmarkets"
+    assert mt == "spot"
+
+
 def test_live_crypto_kline_params_resolves_credential_id(monkeypatch):
     def _fake_resolve(cfg, user_id=1):
         assert user_id == 42

@@ -70,6 +70,8 @@ _MARKET_ALIASES: Dict[str, str] = {
     "russia": "MOEX",
 }
 
+_MT5_EXCHANGE_ALIASES = {"mt5", "cptmarkets", "cpt_markets"}
+
 
 class DataSourceFactory:
     """
@@ -289,6 +291,8 @@ class DataSourceFactory:
         mt = (market_type or "").strip().lower()
         if mt in ("futures", "future", "perp", "perpetual"):
             mt = "swap"
+        if ex in _MT5_EXCHANGE_ALIASES:
+            return cls.get_source("MT5")
         if market == "Crypto" and (ex or mt == "swap"):
             from app.data_sources.crypto import CryptoDataSource
 

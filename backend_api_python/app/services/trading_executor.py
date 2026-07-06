@@ -3227,14 +3227,13 @@ class TradingExecutor:
         user_id: int = 1,
     ) -> Tuple[Optional[str], Optional[str]]:
         """Resolve the crypto K-line venue used by live or signal execution."""
-        if (market_category or "").strip() != "Crypto":
-            return None, None
         mode = (execution_mode or "").strip().lower()
         if mode not in ("live", "signal"):
             return None, None
-        from app.data_sources.crypto import resolve_crypto_venue
 
+        mc = (market_category or "").strip()
         cfg = exchange_config if isinstance(exchange_config, dict) else {}
+        tc = trading_config if isinstance(trading_config, dict) else {}
         cred_ref = cfg.get("credential_id") or cfg.get("credentials_id")
         if cred_ref and not (
             cfg.get("exchange_id") or cfg.get("exchangeId") or cfg.get("exchange")
@@ -3245,6 +3244,23 @@ class TradingExecutor:
                 cfg = resolve_exchange_config(cfg, user_id=int(user_id or 1))
             except Exception:
                 pass
+
+        if mc in ("Forex", "MT5"):
+            ex = str(
+                cfg.get("exchange_id")
+                or cfg.get("exchangeId")
+                or cfg.get("exchange")
+                or tc.get("exchange_id")
+                or tc.get("exchangeId")
+                or ""
+            ).strip().lower()
+            if ex in MT5_EXCHANGES:
+                return ex, "spot"
+            return None, None
+
+        if mc != "Crypto":
+            return None, None
+        from app.data_sources.crypto import resolve_crypto_venue
 
         ex, mt = resolve_crypto_venue(
             exchange_config=cfg,
@@ -3261,7 +3277,15 @@ class TradingExecutor:
         kline_exchange_id: Optional[str],
         kline_market_type: Optional[str],
     ) -> None:
-        if (market_category or "").strip() != "Crypto":
+        mc = (market_category or "").strip()
+        ex = (kline_exchange_id or "").strip().lower()
+        if mc in ("Forex", "MT5") and ex in MT5_EXCHANGES:
+            logger.info(
+                f"Strategy {strategy_id} MT5 K-line ({execution_mode}): "
+                f"{kline_exchange_id}/{kline_market_type}"
+            )
+            return
+        if mc != "Crypto":
             return
         mode = (execution_mode or "").strip().lower()
         if mode not in ("live", "signal"):

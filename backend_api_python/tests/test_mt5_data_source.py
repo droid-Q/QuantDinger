@@ -1,3 +1,4 @@
+from app.data_sources.factory import DataSourceFactory
 from app.data_sources.mt5 import MT5DataSource
 from app.utils.mt5_session import mt5_sessions
 
@@ -45,3 +46,8 @@ def test_mt5_data_source_returns_empty_when_not_connected():
 
     assert source.get_ticker("XAUUSD") == {"last": 0, "symbol": "XAUUSD"}
     assert source.get_kline("XAUUSD", "1H", 10) == []
+
+
+def test_mt5_exchange_id_routes_forex_market_to_mt5_source():
+    source = DataSourceFactory._resolve_source("Forex", exchange_id="cptmarkets", market_type="spot")
+    assert isinstance(source, MT5DataSource)
