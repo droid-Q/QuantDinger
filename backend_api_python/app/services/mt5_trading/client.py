@@ -86,6 +86,10 @@ class OrderResult:
     message: str = ""
     raw: Dict[str, Any] = field(default_factory=dict)
 
+    @property
+    def exchange_order_id(self) -> str:
+        return self.order_id
+
 
 class MT5Client:
     """Small wrapper around the local MT5 Terminal Python API."""

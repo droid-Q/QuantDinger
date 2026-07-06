@@ -86,6 +86,7 @@ def test_mt5_client_market_and_reduce_only_orders(monkeypatch):
     close_result = client.place_market_order("XAUUSD", "sell", 0.02, reduce_only=True)
 
     assert open_result.success is True
+    assert open_result.exchange_order_id == "777"
     assert close_result.success is True
     assert "position" not in fake.sent[-2]
     assert fake.sent[-1]["position"] == 12345
