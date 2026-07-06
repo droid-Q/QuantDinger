@@ -102,6 +102,95 @@ def test_place_live_market_order_spot_buy_uses_quote_amount(monkeypatch):
     assert client.kwargs["client_order_id"] == "oid"
 
 
+def test_mt5_live_order_phases_route_to_client(monkeypatch):
+    class FakeMT5Client:
+        def __init__(self):
+            self.calls = {}
+
+        def place_limit_order(self, **kwargs):
+            self.calls["limit"] = kwargs
+            return type("Result", (), {"exchange_order_id": "limit-1", "raw": kwargs})()
+
+        def place_market_order(self, **kwargs):
+            self.calls["market"] = kwargs
+            return type("Result", (), {"exchange_order_id": "market-1", "raw": kwargs})()
+
+        def wait_for_fill(self, **kwargs):
+            self.calls["wait"] = kwargs
+            return {"filled": 1, "avg_price": 2000, "fee": 0, "fee_ccy": "USD"}
+
+        def cancel_order(self, order_id):
+            self.calls["cancel"] = order_id
+            return True
+
+    monkeypatch.setattr(live_order_phases, "MT5Client", FakeMT5Client)
+    client = FakeMT5Client()
+
+    live_order_phases.place_live_limit_order(
+        client=client,
+        symbol="XAUUSD",
+        side="buy",
+        amount=0.1,
+        price=2000,
+        reduce_only=False,
+        pos_side="long",
+        client_order_id="oid-limit",
+        market_type="spot",
+        payload={},
+        exchange_config={},
+        leverage=1,
+        order_mode="maker_then_market",
+    )
+    live_order_phases.place_live_market_order(
+        client=client,
+        symbol="XAUUSD",
+        side="sell",
+        amount=0.1,
+        reduce_only=True,
+        pos_side="long",
+        client_order_id="oid-market",
+        market_type="spot",
+        payload={},
+        exchange_config={},
+        leverage=1,
+        ref_price=2001,
+        spot_quote_amt=0,
+        spot_market_buy_uses_quote=False,
+    )
+    snapshot = live_order_phases.wait_live_order_fill(
+        client=client,
+        symbol="XAUUSD",
+        order_id="limit-1",
+        client_order_id="oid-limit",
+        market_type="spot",
+        exchange_config={},
+        max_wait_sec=1,
+        phase="limit",
+    )
+    cancelled = live_order_phases.cancel_live_limit_order(
+        client=client,
+        symbol="XAUUSD",
+        order_id="limit-1",
+        client_order_id="oid-limit",
+        market_type="spot",
+        exchange_config={},
+    )
+
+    assert client.calls["limit"] == {
+        "symbol": "XAUUSD",
+        "side": "buy",
+        "size": 0.1,
+        "price": 2000,
+        "client_order_id": "oid-limit",
+    }
+    assert client.calls["market"]["quantity"] == 0.1
+    assert client.calls["market"]["reduce_only"] is True
+    assert client.calls["wait"]["order_id"] == "limit-1"
+    assert snapshot["filled"] == 1
+    assert cancelled is True
+    assert client.calls["cancel"] == "limit-1"
+
+
 def test_wait_live_order_fill_enforces_slow_exchange_limit_wait(monkeypatch):
     class FakeGateSpot:
         def wait_for_fill(self, **kwargs):
@@ -206,4 +295,3 @@ def test_build_live_order_context_rejects_policy_violation():
         assert exc.strategy_id == 12
     else:
         raise AssertionError("expected LiveOrderRejected")
-

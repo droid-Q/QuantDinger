@@ -21,6 +21,7 @@ from app.services.live_trading.kraken import KrakenClient
 from app.services.live_trading.kraken_futures import KrakenFuturesClient
 from app.services.live_trading.okx import OkxClient
 from app.services.live_trading.symbols import to_gate_currency_pair, to_okx_swap_inst_id
+from app.services.mt5_trading import MT5Client
 from app.services.pending_orders.live_order_support import FillAccumulator
 
 
@@ -184,6 +185,8 @@ def place_live_limit_order(
             pos_side=pos_side,
             client_order_id=client_order_id,
         )
+    if isinstance(client, MT5Client):
+        return client.place_limit_order(symbol=str(symbol), side=side, size=amount, price=price, client_order_id=client_order_id)
     raise LiveTradingError(f"Unsupported client type: {type(client)}")
 
 
@@ -233,6 +236,8 @@ def wait_live_order_fill(
         return client.wait_for_fill(order_id=order_id, contract=to_gate_currency_pair(str(symbol)), max_wait_sec=wait_sec)
     if isinstance(client, HtxClient):
         return client.wait_for_fill(symbol=str(symbol), order_id=order_id, client_order_id=client_order_id, max_wait_sec=wait_sec)
+    if isinstance(client, MT5Client):
+        return client.wait_for_fill(order_id=order_id, max_wait_sec=wait_sec)
     raise LiveTradingError(f"Unsupported client type: {type(client)}")
 
 
@@ -271,6 +276,8 @@ def cancel_live_limit_order(
         return client.cancel_order(order_id=order_id)
     if isinstance(client, HtxClient):
         return client.cancel_order(symbol=str(symbol), order_id=order_id, client_order_id=client_order_id)
+    if isinstance(client, MT5Client):
+        return client.cancel_order(order_id)
     return None
 
 
@@ -438,5 +445,13 @@ def place_live_market_order(
             reduce_only=reduce_only,
             pos_side=pos_side,
             client_order_id=client_order_id,
+        )
+    if isinstance(client, MT5Client):
+        return client.place_market_order(
+            symbol=str(symbol),
+            side=side,
+            quantity=amount,
+            client_order_id=client_order_id,
+            reduce_only=reduce_only,
         )
     raise LiveTradingError(f"Unsupported client type: {type(client)}")
