@@ -49,20 +49,33 @@ def _config_to_vault_dict(config: MT5Config) -> dict:
     }
 
 
-def _load_saved_mt5_config(user_id: int) -> dict:
-    """Load the most recent saved MT5/CPT credential for this user."""
+def _load_saved_mt5_config(user_id: int, credential_id: int = 0) -> dict:
+    """Load a saved MT5/CPT credential for this user."""
     with get_db_connection() as db:
         cur = db.cursor()
-        cur.execute(
-            """
-            SELECT id, encrypted_config
-            FROM qd_exchange_credentials
-            WHERE user_id = %s AND exchange_id IN ('mt5', 'cptmarkets', 'cpt_markets')
-            ORDER BY updated_at DESC NULLS LAST, id DESC
-            LIMIT 1
-            """,
-            (int(user_id),),
-        )
+        if int(credential_id or 0) > 0:
+            cur.execute(
+                """
+                SELECT id, encrypted_config
+                FROM qd_exchange_credentials
+                WHERE user_id = %s
+                  AND id = %s
+                  AND exchange_id IN ('mt5', 'cptmarkets', 'cpt_markets')
+                LIMIT 1
+                """,
+                (int(user_id), int(credential_id)),
+            )
+        else:
+            cur.execute(
+                """
+                SELECT id, encrypted_config
+                FROM qd_exchange_credentials
+                WHERE user_id = %s AND exchange_id IN ('mt5', 'cptmarkets', 'cpt_markets')
+                ORDER BY updated_at DESC NULLS LAST, id DESC
+                LIMIT 1
+                """,
+                (int(user_id),),
+            )
         row = cur.fetchone() or {}
         cur.close()
     if not row:
@@ -211,7 +224,19 @@ def connect():
         if not local_desktop_brokers_allowed():
             return jsonify({"success": False, "error": desktop_broker_cloud_reject_message()}), 400
 
+        user_id = int(getattr(g, "user_id", 1) or 1)
         data = request.get_json() or {}
+        credential_id = _int(data.get("credential_id") or data.get("credentialId"), 0)
+        if credential_id > 0:
+            saved = _load_saved_mt5_config(user_id, credential_id)
+            if not saved:
+                return jsonify({"success": False, "error": "Saved MT5 credential not found"}), 404
+            merged = dict(saved)
+            for key, value in data.items():
+                if key in ("credential_id", "credentialId") or value in (None, ""):
+                    continue
+                merged[key] = value
+            data = merged
         config = MT5Config(
             login=_int(data.get("login") or data.get("mt5_login") or data.get("account")),
             password=str(data.get("password") or data.get("mt5_password") or ""),
@@ -230,7 +255,7 @@ def connect():
         if not client.connect():
             return jsonify({"success": False, "error": "Connection failed. Please check MT5 Terminal and account settings."}), 400
 
-        cred_id = _save_or_update_mt5_credential(int(getattr(g, "user_id", 1) or 1), config)
+        cred_id = credential_id if credential_id > 0 else _save_or_update_mt5_credential(user_id, config)
         _sessions.set(client)
         status = client.get_connection_status()
         status["credential_id"] = cred_id

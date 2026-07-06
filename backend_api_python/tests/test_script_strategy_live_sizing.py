@@ -325,6 +325,27 @@ def test_fetch_latest_kline_keeps_xaut_on_configured_crypto_market():
     assert kwargs["market_type"] == "swap"
 
 
+def test_fetch_latest_kline_uses_mt5_client_for_cptmarkets():
+    ex = _make_executor()
+    ex.kline_service = MagicMock()
+    mt5 = MagicMock()
+    mt5.get_kline.return_value = [{"time": 1}, {"time": 2}]
+
+    out = ex._fetch_latest_kline(
+        "XAUUSD",
+        "1h",
+        limit=2,
+        market_category="Forex",
+        exchange_id="cptmarkets",
+        market_type="spot",
+        exchange=mt5,
+    )
+
+    assert len(out) == 2
+    mt5.get_kline.assert_called_once_with("XAUUSD", "1h", 2)
+    ex.kline_service.get_kline.assert_not_called()
+
+
 @patch("app.services.trading_executor.append_strategy_log")
 @patch.object(TradingExecutor, "_execute_exchange_order", return_value={"success": True})
 @patch.object(TradingExecutor, "_get_available_capital", return_value=100.0)

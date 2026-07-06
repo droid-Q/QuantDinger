@@ -304,7 +304,11 @@ class MT5Client:
         }
         mt5_tf = tf_map.get(str(timeframe), mt5.TIMEFRAME_H1)
         sym = self.resolve_symbol(symbol)
-        rows = mt5.copy_rates_from_pos(sym, mt5_tf, 0, int(limit or 300)) or []
+        rows = mt5.copy_rates_from_pos(sym, mt5_tf, 0, int(limit or 300))
+        if rows is None:
+            code, msg = self._last_error()
+            logger.warning("MT5 copy_rates_from_pos returned None for %s %s: %s %s", sym, timeframe, code, msg)
+            rows = []
         out: List[Dict[str, Any]] = []
         for row in rows:
             item = _as_dict(row)

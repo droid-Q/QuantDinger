@@ -2,6 +2,9 @@ import sys
 import types
 from collections import namedtuple
 
+from flask import Flask, g
+
+from app.routes import mt5 as mt5_routes
 from app.services.mt5_trading import client as mt5_client_module
 from app.services.mt5_trading.client import MT5Client, MT5Config
 
@@ -63,6 +66,11 @@ def _fake_mt5():
     return mod
 
 
+class AmbiguousRows(list):
+    def __bool__(self):
+        raise ValueError("truth value is ambiguous")
+
+
 def test_mt5_client_market_and_reduce_only_orders(monkeypatch):
     fake = _fake_mt5()
     monkeypatch.setitem(sys.modules, "MetaTrader5", fake)
@@ -81,3 +89,66 @@ def test_mt5_client_market_and_reduce_only_orders(monkeypatch):
     assert close_result.success is True
     assert "position" not in fake.sent[-2]
     assert fake.sent[-1]["position"] == 12345
+
+
+def test_mt5_client_kline_accepts_numpy_like_rows(monkeypatch):
+    fake = _fake_mt5()
+    fake.copy_rates_from_pos = lambda symbol, timeframe, start, count: AmbiguousRows([
+        {"time": 1, "open": 1.0, "high": 2.0, "low": 0.5, "close": 1.5, "tick_volume": 10},
+        {"time": 2, "open": 1.5, "high": 2.5, "low": 1.0, "close": 2.0, "tick_volume": 11},
+    ])
+    monkeypatch.setitem(sys.modules, "MetaTrader5", fake)
+    monkeypatch.setattr(mt5_client_module, "_mt5", None)
+
+    client = MT5Client(MT5Config(login=1, password="pw", server="CPT-Demo"))
+    assert client.connect() is True
+    assert len(client.get_kline("XAUUSD", "1h", 2)) == 2
+
+
+def test_mt5_connect_accepts_saved_credential_id(monkeypatch):
+    app = Flask(__name__)
+    captured = {}
+
+    class DummyClient:
+        connected = True
+
+        def __init__(self, config):
+            self.config = config
+            captured["config"] = config
+
+        def connect(self):
+            return True
+
+        def get_connection_status(self):
+            return {
+                "connected": True,
+                "login": self.config.login,
+                "server": self.config.server,
+            }
+
+    monkeypatch.setattr(mt5_routes, "local_desktop_brokers_allowed", lambda: True)
+    monkeypatch.setattr(mt5_routes, "_load_saved_mt5_config", lambda user_id, credential_id=0: {
+        "credential_id": credential_id,
+        "exchange_id": "cptmarkets",
+        "broker": "CPT Markets",
+        "mt5_login": "89958589",
+        "mt5_password": "secret",
+        "mt5_server": "CPTMarkets-Live",
+        "mt5_path": r"C:\Program Files\CPT Markets MT5 Terminal\terminal64.exe",
+        "mt5_timeout": 60000,
+    })
+    monkeypatch.setattr(mt5_routes, "MT5Client", DummyClient)
+    monkeypatch.setattr(mt5_routes, "_save_or_update_mt5_credential", lambda user_id, config: 7)
+    monkeypatch.setattr(mt5_routes._sessions, "set", lambda client: captured.setdefault("session", client))
+
+    with app.test_request_context(json={"credential_id": 7}):
+        g.user_id = 1
+        response = mt5_routes.connect.__wrapped__()
+
+    body = response.get_json()
+    assert body["success"] is True
+    assert body["data"]["credential_id"] == 7
+    assert captured["config"].login == 89958589
+    assert captured["config"].password == "secret"
+    assert captured["config"].server == "CPTMarkets-Live"
+    assert captured["session"].connected is True

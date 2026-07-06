@@ -2091,6 +2091,17 @@ class TradingExecutor:
             self._log_crypto_kline_source(
                 strategy_id, market_category, execution_mode, kline_exchange_id, kline_market_type
             )
+            if (kline_exchange_id or "").strip().lower() in MT5_EXCHANGES:
+                try:
+                    from app.services.live_trading.factory import create_client
+
+                    exchange = create_client(
+                        exchange_config if isinstance(exchange_config, dict) else {},
+                        market_type=kline_market_type or market_type,
+                    )
+                except Exception as e:
+                    _abort_loop(f"failed to connect MT5/CPT market data for {symbol}: {e}")
+                    return
             if exchange_config and (exchange_config.get('api_key') or exchange_config.get('apiKey')):
                 try:
                     self._query_exchange_fee_rate(strategy_id, exchange_config, symbol, market_type)
