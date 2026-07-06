@@ -25,9 +25,15 @@ from app.services.mt5_trading import MT5Client
 from app.services.pending_orders.live_order_support import FillAccumulator
 
 
-def apply_fill_snapshot(fills: FillAccumulator, snapshot: Dict[str, Any]) -> None:
-    fills.apply_fill(float(snapshot.get("filled") or 0.0), float(snapshot.get("avg_price") or 0.0))
-    fills.apply_fee(float(snapshot.get("fee") or 0.0), str(snapshot.get("fee_ccy") or ""))
+def _snapshot_get(snapshot: Any, key: str) -> Any:
+    if isinstance(snapshot, dict):
+        return snapshot.get(key)
+    return getattr(snapshot, key, None)
+
+
+def apply_fill_snapshot(fills: FillAccumulator, snapshot: Any) -> None:
+    fills.apply_fill(float(_snapshot_get(snapshot, "filled") or 0.0), float(_snapshot_get(snapshot, "avg_price") or 0.0))
+    fills.apply_fee(float(_snapshot_get(snapshot, "fee") or 0.0), str(_snapshot_get(snapshot, "fee_ccy") or ""))
 
 
 def maker_limit_price(*, ref_price: float, side: str, maker_offset: float) -> float:

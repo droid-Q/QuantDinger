@@ -35,14 +35,10 @@ def strategy_uses_fill_ledger(strategy_config: Dict[str, Any]) -> bool:
     bot_type = str(
         sc.get("bot_type") or tc.get("bot_type") or ""
     ).strip().lower()
-    if bot_type == "grid":
+    if bot_type in _FILL_LEDGER_BOT_TYPES:
         return True
     stype = str(sc.get("strategy_type") or "").strip()
-    if stype != "ScriptStrategy":
-        return False
-    if bot_type in _FILL_LEDGER_BOT_TYPES:
-        return False
-    return True
+    return stype == "ScriptStrategy"
 
 
 def apply_exchange_snapshot_to_strategy_ledger(

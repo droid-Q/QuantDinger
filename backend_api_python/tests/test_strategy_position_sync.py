@@ -120,3 +120,11 @@ def test_apply_exchange_snapshot_skips_unrelated_symbols(monkeypatch):
     assert written == 1
     assert len(upserts) == 1
     assert upserts[0]["symbol"] == "ETH/USDT"
+
+
+def test_dca_strategy_uses_fill_ledger():
+    from app.services.live_trading.strategy_position_sync import strategy_uses_fill_ledger
+
+    assert strategy_uses_fill_ledger({"trading_config": {"bot_type": "dca"}}) is True
+    assert strategy_uses_fill_ledger({"strategy_type": "ScriptStrategy", "trading_config": {"bot_type": "trend"}}) is True
+    assert strategy_uses_fill_ledger({"strategy_type": "IndicatorStrategy", "trading_config": {"bot_type": "trend"}}) is False

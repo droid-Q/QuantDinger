@@ -1888,7 +1888,10 @@ class PendingOrderWorker:
                     phase="market",
                 )
                 phases["market_query"] = q2
+                prev_filled = float(fills.total_base or 0.0)
                 apply_fill_snapshot(fills, q2)
+                if float(fills.total_base or 0.0) <= prev_filled:
+                    apply_fill_snapshot(fills, res2)
             except LiveTradingError as e:
                 logger.warning(f"live market phase failed: pending_id={order_id}, strategy_id={strategy_id}, cfg={safe_cfg}, err={e}")
                 friendly_error = self._friendly_order_error(

@@ -53,6 +53,18 @@ def test_fill_accumulator_tracks_weighted_average_and_fee():
     assert fills.fee_ccy == "USDT"
 
 
+def test_apply_fill_snapshot_reads_order_result_attrs():
+    fills = FillAccumulator()
+    result = type("Result", (), {"filled": 0.1, "avg_price": 2000, "fee": 0.5, "fee_ccy": "USD"})()
+
+    live_order_phases.apply_fill_snapshot(fills, result)
+
+    assert fills.total_base == 0.1
+    assert fills.avg_price() == 2000
+    assert fills.total_fee == 0.5
+    assert fills.fee_ccy == "USD"
+
+
 def test_maker_limit_price_offsets_buy_and_sell():
     assert live_order_phases.maker_limit_price(ref_price=100, side="buy", maker_offset=0.01) == 99
     assert live_order_phases.maker_limit_price(ref_price=100, side="sell", maker_offset=0.01) == 101
