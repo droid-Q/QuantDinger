@@ -6,7 +6,7 @@ maintain. Prefer small, boring, easy-to-review changes.
 ## Before You Start
 
 1. Find the closest existing module.
-2. Read `docs/ARCHITECTURE.md` and `docs/MODULE_BOUNDARIES.md`.
+2. Read `docs/architecture/ARCHITECTURE.md` and `docs/architecture/MODULE_BOUNDARIES.md`.
 3. Decide whether the change is API, service, adapter, data, worker, or docs.
 4. Keep route paths and response fields backward-compatible unless a breaking
    change is explicitly approved.

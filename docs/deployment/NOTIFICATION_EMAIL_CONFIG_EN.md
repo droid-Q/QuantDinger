@@ -249,4 +249,4 @@ For high-volume notifications, consider dedicated email services.
 
 - [Telegram Notification Configuration](./NOTIFICATION_TELEGRAM_CONFIG_EN.md)
 - [SMS Notification Configuration](./NOTIFICATION_SMS_CONFIG_EN.md)
-- [Strategy Development Guide](./STRATEGY_DEV_GUIDE.md)
+- [Strategy Development Guide](../trading/STRATEGY_DEV_GUIDE.md)

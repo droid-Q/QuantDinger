@@ -1,294 +1,238 @@
-# QuantDinger Python API (backend)
+# QuantDinger Python Backend
 
-Flask-based backend for QuantDinger: market data, indicators, AI analysis, backtesting, and a strategy runtime with multi-user support.
+This directory contains the Flask API, domain services, background workers,
+database migrations, OpenAPI integration, and backend tests for QuantDinger.
 
-## What you get
+Start with the [project README](../README.md) for product installation. This
+document is the backend contributor and operator quick reference.
 
-- **Multi-market data layer**: factory-based providers (crypto / US stocks / forex / futures, etc.)
-- **Indicators + backtesting**: persisted runs/history in PostgreSQL
-- **AI multi-agent analysis**: optional web search + OpenRouter LLM integration
-- **Strategy runtime**: thread-based executor, with optional auto-restore on startup
-- **Pending orders worker (optional)**: polls queued orders and dispatches signals (webhook/notifications)
-- **Multi-user authentication**: role-based access control (admin/manager/user/viewer)
-- **User management**: admin can create/edit/delete users and reset passwords
+## Runtime model
 
-## Project layout
+The production deployment reuses one backend image across independent process
+roles:
+
+| Role | Command | Ownership |
+| --- | --- | --- |
+| API | `gunicorn -c gunicorn_config.py run:app` | HTTP, authentication, validation, and durable command submission. |
+| Migration | `python -m app.commands.migrate` | Fail-fast schema application before services start. |
+| Trading | `python -m app.commands.trading_worker` | Strategy runtimes, pending orders, broker sessions, and reconciliation. |
+| Scheduler | `python -m app.commands.scheduler` | Portfolio, deployment, payment, and signal schedules. |
+| Celery worker | `celery -A app.celery_app:celery_app worker` | Finite AI, backtest, experiment, report, and maintenance jobs. |
+| Celery beat | `celery -A app.celery_app:celery_app beat` | Periodic task dispatch. |
+
+HTTP processes must not start trading or scheduler threads. Celery must not own
+long-lived strategy loops or broker sessions. See
+[Process roles and durable tasks](../docs/architecture/PROCESS_ROLES_AND_TASKS.md).
+
+## Storage model
+
+- PostgreSQL 18 is the system of record.
+- `redis` is an evictable application cache.
+- `redis-jobs` is the durable Celery broker/result tier with AOF and
+  `noeviction`.
+- Strategy ownership uses PostgreSQL commands, leases, fencing tokens, and
+  worker heartbeats.
+
+Queue state must never share the cache Redis eviction policy.
+
+## Directory map
 
 ```text
-backend_api_python/
-|-- app/
-|   |-- __init__.py                 # Flask app factory + startup hooks
-|   |-- config/                     # Settings (env-driven)
-|   |-- data_sources/               # Data sources + factory
-|   |-- routes/                     # REST endpoints
-|   |-- services/                   # Analysis, agents, strategies, search, user_service
-|   |-- utils/                      # PostgreSQL helpers, config loader, logging, HTTP utils
-|-- migrations/
-|   |-- init.sql                    # PostgreSQL schema initialization
-|-- env.example                     # Copy to .env for local config
-|-- requirements.txt
-|-- run.py                          # Entrypoint (loads .env, applies proxy env, starts Flask)
-|-- gunicorn_config.py              # Optional production config
-|-- README.md
+app/
+  commands/             Process entry points and operational commands
+  config/               Environment-backed configuration
+  data_providers/       Aggregated market and global data providers
+  data_sources/         Raw market data adapters
+  observability/        Metrics and request instrumentation
+  openapi/              Human API schemas, registration, and export metadata
+  routes/               HTTP facades and compatibility routes
+  services/             Domain workflows and integration orchestration
+  tasks/                Celery task definitions
+  utils/                Small infrastructure helpers
+migrations/             PostgreSQL schema and incremental migrations
+scripts/                Backend quality, export, and production checks
+tests/                  Unit, integration, contract, and release-gate tests
 ```
 
-## Architecture and quality guardrails
+Read [Backend architecture](../docs/architecture/ARCHITECTURE.md) and
+[Module boundaries](../docs/architecture/MODULE_BOUNDARIES.md) before larger changes.
 
-- Backend module boundaries: `../docs/MODULE_BOUNDARIES.md`
-- Concurrency model: `../docs/CONCURRENCY_MODEL.md`
-- Canonical live-trading venue matrix: `app/services/live_trading/capabilities.py`
-- Stable live order contracts: `app/services/live_trading/contracts.py`
-- Structural regression guard:
+## Configuration
+
+Create the runtime environment file:
 
 ```bash
-python scripts/backend_quality_check.py
+cp env.example .env
 ```
 
-Exchange integrations should add offline fixtures and pass:
+At minimum, replace these values before a shared or production deployment:
+
+```dotenv
+SECRET_KEY=<independent-random-value-at-least-32-bytes>
+CREDENTIAL_ENCRYPTION_KEY=<independent-random-value-at-least-32-bytes>
+ADMIN_USER=<initial-admin-name>
+ADMIN_PASSWORD=<strong-initial-password>
+```
+
+Generate each secret independently:
 
 ```bash
-python scripts/exchange_smoke_test.py --offline-contracts
+python -c "import secrets; print(secrets.token_hex(32))"
 ```
 
-## Quick start (Docker - Recommended)
+Docker-level database, Redis, Grafana, port, image, and resource settings belong
+in the repository-root `.env`; application runtime settings belong here.
 
-### 1) Configure environment
+## Docker workflow
 
-Create `.env` file in project root:
+Run these commands from the repository root.
+
+Core development stack:
 
 ```bash
-# Database
-POSTGRES_USER=quantdinger
-POSTGRES_PASSWORD=your_secure_password
-POSTGRES_DB=quantdinger
-
-# Admin account (created on first startup)
-ADMIN_USER=admin
-ADMIN_PASSWORD=your_admin_password
-
-# Optional
-OPENROUTER_API_KEY=your_api_key
+docker compose up -d --build
+docker compose ps
 ```
 
-AtlasCloud is supported as an OpenAI-compatible LLM provider. See the official
-[AtlasCloud LLM API docs](https://www.atlascloud.ai/docs/models/llm) and
-[API key guide](https://www.atlascloud.ai/docs/api-keys), then set:
+Production-hardened stack with optional monitoring:
 
 ```bash
-LLM_PROVIDER=atlascloud
-ATLASCLOUD_API_KEY=your_api_key
-ATLASCLOUD_MODEL=deepseek-v3
-ATLASCLOUD_BASE_URL=https://api.atlascloud.ai/v1
+python backend_api_python/scripts/check_production_config.py \
+  --env-file .env \
+  --env-file backend_api_python/.env
+
+docker compose \
+  -f docker-compose.yml \
+  -f docker-compose.production.yml \
+  -f docker-compose.observability.yml \
+  up -d --build
 ```
 
-Release builds inject the backend app version from the Git tag (`v3.0.23` ->
-`3.0.23`). Local source runs fall back to `git describe` and then the repo-root
-`VERSION` file; local Docker builds can override with `APP_VERSION`.
+The production overlay uses UID/GID `10001`, a read-only root filesystem,
+dropped capabilities, bounded temporary filesystems, and CPU/memory limits.
+Remove the observability overlay when monitoring is provided elsewhere.
 
-### 2) Start services
+## Local Python workflow
+
+Prerequisites:
+
+- Python 3.12;
+- PostgreSQL 18;
+- Redis 8 for cache and Celery-backed workflows.
+
+Create an environment and install development dependencies:
 
 ```bash
-docker-compose up -d
+python -m venv .venv
+python -m pip install --upgrade pip
+python -m pip install -r requirements-dev.txt
 ```
 
-This will:
-- Start PostgreSQL database (port 5432)
-- Initialize database schema automatically
-- Start backend API (port 5000)
-- Start frontend (port 8888)
-- Create admin user from `ADMIN_USER`/`ADMIN_PASSWORD`
-
-### 3) Access the system
-
-- Frontend: `http://localhost:8888`
-- Backend API: `http://localhost:5000`
-- Login with your configured admin credentials
-
-## Quick start (Local Development)
-
-### Prerequisites
-
-- Python 3.10+ recommended
-- PostgreSQL 14+ installed and running
-
-### 1) Setup PostgreSQL
+Apply migrations:
 
 ```bash
-# Create database and user
-sudo -u postgres psql
-CREATE DATABASE quantdinger;
-CREATE USER quantdinger WITH ENCRYPTED PASSWORD 'your_password';
-GRANT ALL PRIVILEGES ON DATABASE quantdinger TO quantdinger;
-\q
-
-# Initialize schema
-psql -U quantdinger -d quantdinger -f migrations/init.sql
+QD_PROCESS_ROLE=migration python -m app.commands.migrate
 ```
 
-### 2) Install dependencies
+Windows PowerShell equivalent:
 
-```bash
-cd backend_api_python
-pip install -r requirements.txt
+```powershell
+$env:QD_PROCESS_ROLE = "migration"
+python -m app.commands.migrate
 ```
 
-### 3) Create your local `.env`
-
-Windows (CMD):
-```bash
-copy env.example .env
-```
-
-Windows (PowerShell):
-```bash
-Copy-Item env.example .env
-```
-
-Then edit `.env` and set:
-
-```bash
-# Required
-DATABASE_URL=postgresql://quantdinger:your_password@localhost:5432/quantdinger
-SECRET_KEY=your-secret-key-change-me
-ADMIN_USER=admin
-ADMIN_PASSWORD=your_admin_password
-
-# Optional but recommended
-OPENROUTER_API_KEY=your_api_key
-```
-
-For AtlasCloud instead, use:
-
-```bash
-LLM_PROVIDER=atlascloud
-ATLASCLOUD_API_KEY=your_api_key
-ATLASCLOUD_MODEL=deepseek-v3
-ATLASCLOUD_BASE_URL=https://api.atlascloud.ai/v1
-```
-
-### 4) Start the API server
+Start the API for local debugging:
 
 ```bash
 python run.py
 ```
 
-Default address: `http://localhost:5000`
+Use the Docker process model when testing trading, scheduler, or Celery ownership
+boundaries. A single local API process is not a substitute for production role
+separation.
 
-## Database (PostgreSQL)
+## Health and operations
 
-- Connection: configured via `DATABASE_URL` environment variable
-- Schema: initialized via `migrations/init.sql`
-- Tables are managed with foreign key constraints and indexes for performance
-- User data isolation via `user_id` column in relevant tables
+| Endpoint | Purpose |
+| --- | --- |
+| `GET /` | Application identity and resolved version. |
+| `GET /api/health` | Basic liveness. |
+| `GET /api/health/ready` | PostgreSQL and Celery broker readiness. |
+| `GET /api/health/workers` | Trading, scheduler, and Celery heartbeat summary. |
+| `GET /metrics` | Prometheus metrics. Keep this private. |
 
-## User Roles & Permissions
+Container logs default to structured JSON and include process role and request
+ID. The optional monitoring stack is documented in
+[Observability](../docs/deployment/OBSERVABILITY.md).
 
-| Role | Permissions |
-|------|-------------|
-| admin | Full access + user management |
-| manager | Strategy, backtest, portfolio, settings |
-| user | Strategy, backtest, portfolio (own data) |
-| viewer | Dashboard view only |
+## API contracts
 
-## API Endpoints
+Human API routes use the existing `/api/...` surface. AI agents use the scoped
+`/api/agent/v1/...` gateway with a separate contract.
 
-### Authentication
-```text
-POST /api/user/login      - User login
-POST /api/user/logout     - User logout
-GET  /api/user/info       - Get current user info
-```
+- Human API conventions: [API_CONVENTIONS.md](../docs/architecture/API_CONVENTIONS.md)
+- Committed OpenAPI: [openapi.yaml](../docs/api/openapi.yaml)
+- Agent contract: [agent-openapi.json](../docs/agent/agent-openapi.json)
 
-### User Management (Admin only)
-```text
-GET    /api/users/list           - List all users
-POST   /api/users/create         - Create user
-PUT    /api/users/update?id=     - Update user
-DELETE /api/users/delete?id=     - Delete user
-POST   /api/users/reset-password - Reset password
-```
-
-### Self-Service
-```text
-GET  /api/users/profile         - Get own profile
-PUT  /api/users/profile/update  - Update own profile
-POST /api/users/change-password - Change own password
-```
-
-### Other Endpoints
-```text
-GET  /api/health
-GET  /api/indicator/kline
-GET  /api/global-market/adanos-sentiment?tickers=AAPL,TSLA
-POST /api/fast-analysis/analyze    - Fast AI analysis (main entry)
-GET  /api/fast-analysis/history    - Analysis history
-GET  /api/fast-analysis/similar-patterns - RAG similar patterns
-POST /api/fast-analysis/feedback   - User feedback on analysis
-```
-
-### Optional Adanos Market Sentiment
-
-Set `ADANOS_API_KEY` to enable optional US stock sentiment enrichment from the
-Adanos Market Sentiment API. If the key is not configured, the endpoint returns
-`enabled=false` and the rest of QuantDinger continues to work normally.
+Regenerate the human API artifact after schema or route metadata changes:
 
 ```bash
-ADANOS_API_KEY=your_adanos_key
-ADANOS_SENTIMENT_SOURCE=reddit  # reddit, x, news, or polymarket
+python scripts/export_openapi.py
 ```
 
-Example:
+With `OPENAPI_ENABLED=true`, interactive documentation is available at:
 
-```text
-GET /api/global-market/adanos-sentiment?tickers=AAPL,TSLA&source=reddit&days=7
-```
+- Swagger UI: <http://127.0.0.1:5000/api/docs/swagger>
+- ReDoc: <http://127.0.0.1:5000/api/docs/redoc>
 
-The response normalizes common compare fields across sources, including
-`sentiment_score`, `buzz_score`, `bullish_pct`, `bearish_pct`, `mentions`,
-`trend`, `trend_history`, and source-specific activity metrics such as
-`subreddit_count`, `unique_tweets`, `source_count`, `trade_count`,
-`market_count`, and `total_liquidity`.
+## Quality checks
 
-### Economic Calendar Data
-
-The global-market economic calendar is free-first. By default it uses the
-no-key AkShare/WallstreetCN calendar fallback. If you configure
-`TRADING_ECONOMICS_CLIENT` and `TRADING_ECONOMICS_KEY`, QuantDinger will try
-Trading Economics as the official international calendar provider before
-falling back. Finnhub paid-only calendar and social-sentiment endpoints are
-skipped by default through `FINNHUB_FREE_ONLY=true`.
-
-Only set `FINNHUB_FREE_ONLY=false` if your Finnhub plan explicitly includes
-those paid endpoints.
-
-## AI analysis & memory
-
-Uses **FastAnalysisService** (single LLM call, multi-factor):
-
-- Memory: `qd_analysis_memory` in PostgreSQL
-- API: `POST /api/fast-analysis/analyze` (main), `/history`, `/similar-patterns`, `/feedback`
-- Calibration: `AICalibrationService` tunes BUY/SELL thresholds from validated outcomes
-
-## Frontend integration
-
-For local Vue dev (private frontend repo):
-- Frontend dev server URL depends on your `vue.config.js` / Vite config
-- Backend: `http://localhost:5000`
-- Point devServer proxy at the backend URL above
-
-## Production (Gunicorn)
+Run the normal backend suite:
 
 ```bash
-gunicorn -c gunicorn_config.py "run:app"
+python -m compileall -q app scripts tests
+ruff check app scripts tests
+python scripts/backend_quality_check.py
+python scripts/check_requirements_lock.py
+python -m pytest -m "not integration and not stress" --ignore=tests/release_gate -q
 ```
 
-## Troubleshooting
+Run release gates independently:
 
-- **Database connection failed**: Check `DATABASE_URL` format and PostgreSQL service status
-- **Outbound requests fail**: Configure `PROXY_URL` in `.env`
-- **Disable auto-restore**: Set `DISABLE_RESTORE_RUNNING_STRATEGIES=true`
-- **Disable pending-order worker**: Set `ENABLE_PENDING_ORDER_WORKER=false`
+```bash
+python -m pytest tests/release_gate/test_cta_backtest_release_gate.py -q
+python -m pytest tests/release_gate/test_live_execution_release_gate.py -q
+python -m pytest tests/release_gate/test_robot_strategy_unification.py -q
+```
+
+Security CI additionally runs `pip-audit`, Bandit, Gitleaks, and CodeQL.
+
+## Contributor rules
+
+- Keep routes focused on parsing, authentication, service calls, and response
+  mapping.
+- Keep Flask request objects out of domain services.
+- Put exchange-specific normalization and errors near the adapter.
+- Make state mutations idempotent and define their retry behavior.
+- Keep code comments, docstrings, logs, and internal errors in English.
+- Preserve existing paths and response fields unless an intentional contract
+  change is documented and tested.
+- Add finite retryable work to Celery; keep long-lived ownership in the trading
+  or scheduler process.
+
+## Versioning
+
+The local fallback version is read from [`VERSION`](VERSION). Release builds can
+inject `APP_VERSION` from a Git tag. Both `v5.0.1` and `5.0.1` normalize to the
+API display value `5.0.1`.
+
+Update checked-in version declarations from the repository root:
+
+```bash
+python scripts/bump_version.py 5.0.1
+python scripts/check_version.py
+```
 
 ## License
 
-Apache License 2.0. See repository root `LICENSE`.
+Apache License 2.0. See the repository-root [LICENSE](../LICENSE).

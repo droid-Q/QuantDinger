@@ -207,5 +207,5 @@ TWILIO_FROM_NUMBER=+14155552671                        # Sender number
 
 - [Telegram Notification Configuration](./NOTIFICATION_TELEGRAM_CONFIG_EN.md)
 - [Email SMTP Notification Configuration](./NOTIFICATION_EMAIL_CONFIG_EN.md)
-- [Strategy Development Guide](./STRATEGY_DEV_GUIDE.md)
+- [Strategy Development Guide](../trading/STRATEGY_DEV_GUIDE.md)
 - [Twilio Official Documentation](https://www.twilio.com/docs/sms)

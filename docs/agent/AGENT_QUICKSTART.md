@@ -147,9 +147,9 @@ Agents must choose the contract by asset type. Do not mix indicator code and str
 
 | Asset type | Contract | Where to read more |
 |------------|----------|--------------------|
-| Chart indicator | Compute visual `output` only. No orders, no backtest columns, no `# @strategy`. | [`docs/INDICATOR_DEV_GUIDE.md`](../INDICATOR_DEV_GUIDE.md) |
-| Script Strategy | Implement `on_init(ctx)` and `on_bar(ctx, bar)`, then emit explicit order intents through `ctx.open_long`, `ctx.close_long`, `ctx.open_short`, `ctx.close_short`, `ctx.add_long`, and `ctx.add_short`. | [`docs/STRATEGY_DEV_GUIDE.md`](../STRATEGY_DEV_GUIDE.md) |
-| Indicator-to-strategy conversion | Explain the indicator visually, then translate its chart signals into explicit Script Strategy intents. | [`docs/STRATEGY_DEV_GUIDE.md`](../STRATEGY_DEV_GUIDE.md) |
+| Chart indicator | Compute visual `output` only. No orders, no backtest columns, no `# @strategy`. | [`docs/trading/INDICATOR_DEV_GUIDE.md`](../trading/INDICATOR_DEV_GUIDE.md) |
+| Script Strategy | Implement `on_init(ctx)` and `on_bar(ctx, bar)`, then emit explicit order intents through `ctx.open_long`, `ctx.close_long`, `ctx.open_short`, `ctx.close_short`, `ctx.add_long`, and `ctx.add_short`. | [`docs/trading/STRATEGY_DEV_GUIDE.md`](../trading/STRATEGY_DEV_GUIDE.md) |
+| Indicator-to-strategy conversion | Explain the indicator visually, then translate its chart signals into explicit Script Strategy intents. | [`docs/trading/STRATEGY_DEV_GUIDE.md`](../trading/STRATEGY_DEV_GUIDE.md) |
 
 For normal AI generation and product workflows, Script Strategy is the only executable strategy contract. A generated strategy must not return old DataFrame execution columns such as `df['open_long']`, `df['close_long']`, `df['open_short']`, or `df['close_short']`. Those columns belong only to a legacy low-level compatibility path and should not be generated for users.
 

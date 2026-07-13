@@ -205,7 +205,7 @@ TWILIO_FROM_NUMBER=+14155552671                        # 发送号码
 
 ## 相关文档
 
-- [Telegram 通知配置](./NOTIFICATION_TELEGRAM_CONFIG_CH.md)
-- [邮箱 SMTP 通知配置](./NOTIFICATION_EMAIL_CONFIG_CH.md)
-- [策略开发指南](./STRATEGY_DEV_GUIDE_CN.md)
+- [Telegram 通知配置](./NOTIFICATION_TELEGRAM_CONFIG_CN.md)
+- [邮箱 SMTP 通知配置](./NOTIFICATION_EMAIL_CONFIG_CN.md)
+- [策略开发指南](../trading/STRATEGY_DEV_GUIDE_CN.md)
 - [Twilio 官方文档](https://www.twilio.com/docs/sms)

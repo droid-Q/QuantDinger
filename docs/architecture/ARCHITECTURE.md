@@ -147,8 +147,8 @@ Treat these as refactor targets, not places to keep adding features:
 
 ## Required Reading Before Larger Changes
 
-- `docs/MODULE_BOUNDARIES.md`
-- `docs/CONCURRENCY_MODEL.md`
-- `docs/API_CONVENTIONS.md`
-- `docs/EXTENSION_GUIDE.md`
+- `docs/architecture/MODULE_BOUNDARIES.md`
+- `docs/architecture/CONCURRENCY_MODEL.md`
+- `docs/architecture/API_CONVENTIONS.md`
+- `docs/architecture/EXTENSION_GUIDE.md`
 - `docs/REFACTOR_PLAN_4_0.md`

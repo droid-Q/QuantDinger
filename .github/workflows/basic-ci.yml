@@ -25,6 +25,9 @@ jobs:
           cache: pip
           cache-dependency-path: backend_api_python/requirements-dev.txt
 
+      - name: Documentation structure and links
+        run: python scripts/check_docs.py
+
       - name: Install development dependencies
         working-directory: ./backend_api_python
         run: |

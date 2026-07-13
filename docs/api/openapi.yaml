@@ -1,6 +1,6 @@
 info:
   description: 'Human-facing REST API for QuantDinger. Agent integrations use `/api/agent/v1`
-    — see `docs/agent/agent-openapi.json`. Conventions: `docs/API_CONVENTIONS.md`.'
+    — see `docs/agent/agent-openapi.json`. Conventions: `docs/architecture/API_CONVENTIONS.md`.'
   contact:
     name: QuantDinger
     url: https://github.com/brokermr810/quantdinger
@@ -131,7 +131,7 @@ components:
           example: QuantDinger Python API
         version:
           type: string
-          example: 3.0.23
+          example: 5.0.1
         status:
           type: string
           example: running

@@ -24,7 +24,7 @@ If you see `process is not defined`, refresh after pulling the latest `index.htm
 
 ## Conventions
 
-See [`../API_CONVENTIONS.md`](../API_CONVENTIONS.md) for envelopes, auth, and Public/Internal tiers.
+See [`../architecture/API_CONVENTIONS.md`](../architecture/API_CONVENTIONS.md) for envelopes, auth, and Public/Internal tiers.
 
 ## Agent API
 

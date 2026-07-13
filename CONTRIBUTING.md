@@ -123,7 +123,7 @@ For local iteration without publishing, clone the Vue repo into `./QuantDinger-V
 
 ## Code Organization
 
-Read [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md), [`docs/EXTENSION_GUIDE.md`](docs/EXTENSION_GUIDE.md), and [`docs/MODULE_BOUNDARIES.md`](docs/MODULE_BOUNDARIES.md) before larger backend changes.
+Read [`docs/architecture/ARCHITECTURE.md`](docs/architecture/ARCHITECTURE.md), [`docs/architecture/EXTENSION_GUIDE.md`](docs/architecture/EXTENSION_GUIDE.md), and [`docs/architecture/MODULE_BOUNDARIES.md`](docs/architecture/MODULE_BOUNDARIES.md) before larger backend changes.
 
 - Keep routes thin: validate input, call a service, return JSON.
 - Put exchange, broker, market data, and strategy behavior behind small services or adapters.
@@ -183,7 +183,7 @@ cd backend_api_python
 python scripts/export_openapi.py
 ```
 
-Read [`docs/API_CONVENTIONS.md`](docs/API_CONVENTIONS.md) before adding Public endpoints.
+Read [`docs/architecture/API_CONVENTIONS.md`](docs/architecture/API_CONVENTIONS.md) before adding Public endpoints.
 CI (`.github/workflows/openapi-ci.yml`) runs Spectral lint, export diff, and oasdiff breaking checks.
 
 ---

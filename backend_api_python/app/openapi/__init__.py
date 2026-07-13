@@ -3,7 +3,7 @@ OpenAPI / flask-smorest integration for the QuantDinger human web API.
 
 Documented routes live here and are merged into ``docs/api/openapi.yaml`` by
 ``scripts/export_openapi.py``. Legacy Blueprint routes remain in ``app/routes/``
-until migrated module-by-module (see ``docs/API_CONVENTIONS.md``).
+until migrated module-by-module (see ``docs/architecture/API_CONVENTIONS.md``).
 """
 from __future__ import annotations
 
@@ -37,7 +37,7 @@ def init_openapi(app: Flask) -> Api:
             "Human-facing REST API for QuantDinger. "
             "Agent integrations use `/api/agent/v1` — see "
             "`docs/agent/agent-openapi.json`. "
-            "Conventions: `docs/API_CONVENTIONS.md`."
+            "Conventions: `docs/architecture/API_CONVENTIONS.md`."
         ),
     )
     app.config.setdefault("OPENAPI_URL_PREFIX", "/")

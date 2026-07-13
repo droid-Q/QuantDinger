@@ -5,10 +5,10 @@ Machine-readable specs:
 
 | Spec | Path | Audience |
 |------|------|----------|
-| Human Web API (flask-smorest) | [`docs/api/openapi.yaml`](api/openapi.yaml) | Frontend, integrators, community |
-| Agent Gateway | [`docs/agent/agent-openapi.json`](agent/agent-openapi.json) | AI agents, MCP, automation |
+| Human Web API (flask-smorest) | [`docs/api/openapi.yaml`](../api/openapi.yaml) | Frontend, integrators, community |
+| Agent Gateway | [`docs/agent/agent-openapi.json`](../agent/agent-openapi.json) | AI agents, MCP, automation |
 
-Browse the human spec locally: open [`docs/api/index.html`](api/index.html) (Redoc).
+Browse the human spec locally: open [`docs/api/index.html`](../api/index.html) (Redoc).
 
 ---
 
@@ -23,7 +23,7 @@ Browse the human spec locally: open [`docs/api/index.html`](api/index.html) (Red
 
 - Authenticated with **agent tokens** (`qd_agent_...`), scoped (`R/W/B/...`).
 - Documented separately; do **not** mix agent routes into the human spec without an `x-agent-only` tag.
-- See [`docs/agent/AGENT_QUICKSTART.md`](agent/AGENT_QUICKSTART.md).
+- See [`docs/agent/AGENT_QUICKSTART.md`](../agent/AGENT_QUICKSTART.md).
 
 ---
 
@@ -126,7 +126,7 @@ OpenAPI schema: `PaginationMeta` (fields may be inlined per route during migrati
 2. **Regenerate spec** — `cd backend_api_python && python scripts/export_openapi.py`
 3. **Commit** — include updated `docs/api/openapi.yaml` in the same PR.
 4. **Agent routes** — update `docs/agent/agent-openapi.json` separately.
-5. **PR checklist** — see [CONTRIBUTING.md](../CONTRIBUTING.md#api-documentation).
+5. **PR checklist** — see [CONTRIBUTING.md](../../CONTRIBUTING.md#api-documentation).
 
 Local interactive docs (debug mode): `/api/docs/swagger` and `/api/docs/redoc` when `OPENAPI_ENABLED=true` or `PYTHON_API_DEBUG=true`.
 

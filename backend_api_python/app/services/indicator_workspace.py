@@ -64,7 +64,7 @@ def get_indicator_authoring_contract() -> Dict[str, Any]:
     template = build_default_indicator_template()
     return {
         "version": "indicator-contract-v2-chart-only",
-        "doc": "docs/INDICATOR_DEV_GUIDE_CN.md",
+        "doc": "docs/trading/INDICATOR_DEV_GUIDE_CN.md",
         "workflow": [
             "1. Call this contract (or MCP get_indicator_authoring_contract) before writing code.",
             "2. Write a full Python chart-only indicator script (not natural language) following required_fields.",

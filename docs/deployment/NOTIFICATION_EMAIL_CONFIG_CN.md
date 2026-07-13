@@ -225,6 +225,6 @@ SMTP_USE_SSL=false
 
 ## 相关文档
 
-- [Telegram 通知配置](./NOTIFICATION_TELEGRAM_CONFIG_CH.md)
-- [手机短信通知配置](./NOTIFICATION_SMS_CONFIG_CH.md)
-- [策略开发指南](./STRATEGY_DEV_GUIDE_CN.md)
+- [Telegram 通知配置](./NOTIFICATION_TELEGRAM_CONFIG_CN.md)
+- [手机短信通知配置](./NOTIFICATION_SMS_CONFIG_CN.md)
+- [策略开发指南](../trading/STRATEGY_DEV_GUIDE_CN.md)

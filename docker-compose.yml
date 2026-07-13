@@ -398,7 +398,7 @@ services:
     # Tag resolution (highest precedence wins):
     #   FRONTEND_TAG   — per-side override, decouples FE from BE
     #   IMAGE_TAG      — unified knob, sets both FE and BE (BE only relevant in ghcr.yml)
-    #   latest         — fallback; pin semver in project-root .env (e.g. IMAGE_TAG=3.0.10)
+    #   latest         — fallback; pin semver in project-root .env (e.g. IMAGE_TAG=5.0.1)
     image: ${FRONTEND_IMAGE:-ghcr.io/brokermr810/quantdinger-frontend}:${FRONTEND_TAG:-${IMAGE_TAG:-latest}}
     pull_policy: always
     container_name: quantdinger-frontend

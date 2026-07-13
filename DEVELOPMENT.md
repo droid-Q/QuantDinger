@@ -77,8 +77,8 @@ The open-source tree **does not** contain Vue source or build artefacts. UI work
 
 ```bash
 # In QuantDinger-Vue
-git tag v3.0.9
-git push origin v3.0.9
+git tag v5.0.1
+git push origin v5.0.1
 ```
 
 The `release-frontend.yml` workflow there builds `linux/amd64 + linux/arm64` images via buildx and pushes them to `ghcr.io/brokermr810/quantdinger-frontend`, tagged with the semver value, `{major}.{minor}`, and `latest`.
@@ -88,10 +88,10 @@ This repo's `docker-compose.yml` (and `docker-compose.ghcr.yml`) references that
 ```bash
 # Project-root .env (sibling of docker-compose.yml)
 # Common: bump both sides together
-echo "IMAGE_TAG=v3.0.9" >> .env
+echo "IMAGE_TAG=5.0.1" >> .env
 
 # Or pin only frontend (testing a UI hotfix against stable backend)
-# echo "FRONTEND_TAG=v3.0.9" >> .env
+# echo "FRONTEND_TAG=5.0.1" >> .env
 
 docker compose pull frontend
 docker compose up -d frontend
@@ -179,7 +179,7 @@ pytest tests/ -v
 
 ## Troubleshooting
 
-- **First-time Docker install or pull failures** - see the bilingual [Installation Troubleshooting](docs/INSTALL_TROUBLESHOOTING.md) guide for Docker Desktop proxy setup, Docker Hub pull errors, and Postgres data-version issues.
+- **First-time Docker install or pull failures** - see the bilingual [Installation Troubleshooting](docs/deployment/INSTALL_TROUBLESHOOTING.md) guide for Docker Desktop proxy setup, Docker Hub pull errors, and Postgres data-version issues.
 
 - **"apikey parameter is incorrect"** from Twelve Data — verify `TWELVE_DATA_API_KEY` in `.env`; Chinese stock data requires a paid plan.
 - **Heatmap "暂无数据"** — usually caused by NaN in yfinance data; the global JSON encoder now sanitises all NaN/Inf to `null`.

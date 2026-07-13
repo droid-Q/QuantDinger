@@ -31,7 +31,7 @@
 3. Enter a display name for your bot (e.g., `QuantDinger Signal Bot`)
 4. Choose a unique username ending with `bot` (e.g., `quantdinger_signal_bot`)
 
-<img src="./screenshots/notification_telegram_token.png" alt="Create Telegram Bot" width="100%" style="border-radius: 10px; box-shadow: 0 4px 8px rgba(0,0,0,0.1);">
+<img src="../screenshots/notification_telegram_token.png" alt="Create Telegram Bot" width="100%" style="border-radius: 10px; box-shadow: 0 4px 8px rgba(0,0,0,0.1);">
 
 ---
 
@@ -65,7 +65,7 @@ https://api.telegram.org/bot123456789:ABCdefGHIjklMNOpqrsTUVwxyz/getUpdates
 
 3. Locate the `chat.id` field in the JSON response — this is your User ID
 
-<img src="./screenshots/notification_telegram_userid_get.png" alt="Get User ID" width="100%" style="border-radius: 10px; box-shadow: 0 4px 8px rgba(0,0,0,0.1);">
+<img src="../screenshots/notification_telegram_userid_get.png" alt="Get User ID" width="100%" style="border-radius: 10px; box-shadow: 0 4px 8px rgba(0,0,0,0.1);">
 
 ### Method 2: Via @userinfobot
 
@@ -94,7 +94,7 @@ In the strategy configuration page under "Signal Notifications":
 1. Enable the **Telegram** notification channel
 2. Enter your Telegram User ID in the designated field
 
-<img src="./screenshots/notification_telegram_userid.png" alt="Configure User ID" width="100%" style="border-radius: 10px; box-shadow: 0 4px 8px rgba(0,0,0,0.1);">
+<img src="../screenshots/notification_telegram_userid.png" alt="Configure User ID" width="100%" style="border-radius: 10px; box-shadow: 0 4px 8px rgba(0,0,0,0.1);">
 
 > 💡 **Tip**: You can enter multiple User IDs (comma-separated) or group/channel IDs for multi-recipient notifications.
 
@@ -123,4 +123,4 @@ Token format is `numbers:alphanumeric_string`, e.g., `123456789:ABCdefGHIjklMNOp
 
 - [Email SMTP Notification Configuration](./NOTIFICATION_EMAIL_CONFIG_EN.md)
 - [SMS Notification Configuration](./NOTIFICATION_SMS_CONFIG_EN.md)
-- [Strategy Development Guide](./STRATEGY_DEV_GUIDE.md)
+- [Strategy Development Guide](../trading/STRATEGY_DEV_GUIDE.md)

@@ -31,7 +31,7 @@
 3. 按照提示输入机器人名称（如：`QuantDinger Signal Bot`）
 4. 输入机器人用户名（必须以 `bot` 结尾，如：`quantdinger_signal_bot`）
 
-<img src="./screenshots/notification_telegram_token.png" alt="创建 Telegram Bot" width="100%" style="border-radius: 10px; box-shadow: 0 4px 8px rgba(0,0,0,0.1);">
+<img src="../screenshots/notification_telegram_token.png" alt="创建 Telegram Bot" width="100%" style="border-radius: 10px; box-shadow: 0 4px 8px rgba(0,0,0,0.1);">
 
 ---
 
@@ -65,7 +65,7 @@ https://api.telegram.org/bot123456789:ABCdefGHIjklMNOpqrsTUVwxyz/getUpdates
 
 3. 在返回的 JSON 中找到 `chat.id` 字段，这就是您的 User ID
 
-<img src="./screenshots/notification_telegram_userid_get.png" alt="获取 User ID" width="100%" style="border-radius: 10px; box-shadow: 0 4px 8px rgba(0,0,0,0.1);">
+<img src="../screenshots/notification_telegram_userid_get.png" alt="获取 User ID" width="100%" style="border-radius: 10px; box-shadow: 0 4px 8px rgba(0,0,0,0.1);">
 
 ### 方法二：通过 @userinfobot 获取
 
@@ -94,7 +94,7 @@ TELEGRAM_BOT_TOKEN=123456789:ABCdefGHIjklMNOpqrsTUVwxyz
 1. 勾选启用 **Telegram** 通知渠道
 2. 在 **User ID** 字段填入您的 Telegram User ID
 
-<img src="./screenshots/notification_telegram_userid.png" alt="配置 User ID" width="100%" style="border-radius: 10px; box-shadow: 0 4px 8px rgba(0,0,0,0.1);">
+<img src="../screenshots/notification_telegram_userid.png" alt="配置 User ID" width="100%" style="border-radius: 10px; box-shadow: 0 4px 8px rgba(0,0,0,0.1);">
 
 > 💡 **提示**：支持填入多个 User ID（逗号分隔）或群组/频道 ID，实现多人通知。
 
@@ -121,6 +121,6 @@ Token 格式为 `数字:字母数字字符串`，例如 `123456789:ABCdefGHIjklM
 
 ## 相关文档
 
-- [邮箱 SMTP 通知配置](./NOTIFICATION_EMAIL_CONFIG_CH.md)
-- [手机短信通知配置](./NOTIFICATION_SMS_CONFIG_CH.md)
-- [策略开发指南](./STRATEGY_DEV_GUIDE_CN.md)
+- [邮箱 SMTP 通知配置](./NOTIFICATION_EMAIL_CONFIG_CN.md)
+- [手机短信通知配置](./NOTIFICATION_SMS_CONFIG_CN.md)
+- [策略开发指南](../trading/STRATEGY_DEV_GUIDE_CN.md)
