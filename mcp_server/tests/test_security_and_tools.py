@@ -27,10 +27,22 @@ def fresh_module(monkeypatch):
 
 
 def test_mcp_tool_registry_complete(fresh_module):
-    assert len(fresh_module.MCP_TOOL_NAMES) == 33
+    assert len(fresh_module.MCP_TOOL_NAMES) == 34
     # Every exported name should correspond to a registered @mcp.tool function.
     for name in fresh_module.MCP_TOOL_NAMES:
         assert hasattr(fresh_module, name), f"missing tool function: {name}"
+
+
+def test_strategy_authoring_contract_uses_agent_gateway(monkeypatch, fresh_module):
+    monkeypatch.setattr(
+        fresh_module,
+        "_get",
+        lambda path, params=None: {"path": path, "params": params},
+    )
+
+    result = fresh_module.get_strategy_authoring_contract()
+
+    assert result["path"] == "/api/agent/v1/strategy-sources/authoring-contract"
 
 
 def test_package_version_matches_pyproject():

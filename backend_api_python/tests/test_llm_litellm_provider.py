@@ -243,6 +243,46 @@ def test_atlascloud_reports_every_failed_model_attempt(monkeypatch):
     assert "deepseek-v3" not in message
 
 
+def test_explicit_atlascloud_provider_is_not_replaced_by_model_prefix(monkeypatch):
+    monkeypatch.setenv("LLM_PROVIDER", "atlascloud")
+    _reset_config_cache()
+    service = LLMService()
+    captured = {}
+
+    monkeypatch.setattr(
+        service,
+        "get_api_key",
+        lambda provider=None: "configured-key",
+    )
+    monkeypatch.setattr(
+        service,
+        "get_base_url",
+        lambda provider=None: f"https://{(provider or service.provider).value}.example/v1",
+    )
+    monkeypatch.setattr(
+        service,
+        "get_default_model",
+        lambda provider=None: "openai/gpt-5.4",
+    )
+
+    def fake_call(messages, model, temperature, api_key, base_url, timeout, use_json_mode=True):
+        captured.update({"model": model, "api_key": api_key, "base_url": base_url})
+        return "generated code"
+
+    monkeypatch.setattr(service, "_call_openai_compatible", fake_call)
+
+    result = service.call_llm_api(
+        [{"role": "user", "content": "generate a strategy"}],
+        model="deepseek/deepseek-v3",
+        use_json_mode=False,
+        try_alternative_providers=False,
+    )
+
+    assert result == "generated code"
+    assert captured["model"] == "deepseek/deepseek-v3"
+    assert captured["base_url"] == "https://atlascloud.example/v1"
+
+
 def test_litellm_keeps_provider_prefixed_model(monkeypatch):
     monkeypatch.setenv("LLM_PROVIDER", "litellm")
     monkeypatch.setenv("LITELLM_MODEL", "anthropic/claude-sonnet-4-20250514")

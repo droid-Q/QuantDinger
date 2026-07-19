@@ -692,8 +692,26 @@ class LLMService:
             2. Otherwise, use the configured LLM_PROVIDER with normalized model name
             3. Fall back to provider's default model if model name is incompatible
         """
-        # Smart provider detection: if model specifies a provider and we have its API key, use it
-        if model and not provider:
+        cfg = load_addon_config()
+        explicit_provider_name = str(
+            cfg.get('llm', {}).get('provider') or os.getenv('LLM_PROVIDER', '')
+        ).strip().lower()
+        explicit_provider = None
+        if explicit_provider_name:
+            try:
+                explicit_provider = LLMProvider(explicit_provider_name)
+            except ValueError:
+                explicit_provider = None
+        override_provider = None
+        if self._provider_override:
+            try:
+                override_provider = LLMProvider(self._provider_override.lower())
+            except ValueError:
+                override_provider = None
+
+        # Infer a provider from the model only when no provider was selected explicitly.
+        provider_is_locked = provider is not None or override_provider is not None or explicit_provider is not None
+        if model and not provider_is_locked:
             detected_provider = self._detect_provider_from_model(model)
             if detected_provider and detected_provider != LLMProvider.OPENROUTER:
                 # Check if we have API key for the detected provider
@@ -702,14 +720,6 @@ class LLMService:
                     logger.debug(f"Auto-detected provider '{provider.value}' from model '{model}'")
         
         p = provider or self.provider
-        cfg = load_addon_config()
-        explicit_provider_name = str(cfg.get('llm', {}).get('provider') or os.getenv('LLM_PROVIDER', '')).strip().lower()
-        explicit_provider = None
-        if explicit_provider_name:
-            try:
-                explicit_provider = LLMProvider(explicit_provider_name)
-            except ValueError:
-                explicit_provider = None
         api_key = (self.get_api_key(p) or "").strip()
         base_url = (self.get_base_url(p) or "").strip()
         if not self.is_configured(p):

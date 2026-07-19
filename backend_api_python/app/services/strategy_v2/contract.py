@@ -307,6 +307,43 @@ _ORDER_API_ARGUMENTS = {
     "order_target_percent": ("symbol", "percent"),
 }
 
+_UNSUPPORTED_STRATEGY_API_NAMES = {
+    "get_current_data": "data.current",
+}
+
+_RUNTIME_GLOBAL_CALL_NAMES = {
+    "factor",
+    "get_factors",
+    "get_fundamentals",
+    "get_history",
+    "get_index_stocks",
+    "get_position",
+    "get_positions",
+    "get_universe_stocks",
+    "history",
+    "indicator",
+    "is_trade",
+    "log",
+    "order",
+    "order_target",
+    "order_target_percent",
+    "order_target_value",
+    "order_value",
+    "run_daily",
+    "run_monthly",
+    "run_weekly",
+    "set_default_protection",
+}
+
+_POSITION_API_ATTRIBUTES = {
+    "amount",
+    "avg_cost",
+    "last_price",
+    "market_value",
+    "position_side",
+    "symbol",
+}
+
 _CANONICAL_SYMBOL_PREFIXES = (
     "CNStock:",
     "Crypto:",
@@ -363,6 +400,8 @@ def _validate_strategy_api_calls(code: str) -> None:
         tree = ast.parse(code)
     except SyntaxError:
         return
+    _validate_initialize_context_params(tree)
+    _validate_global_call_names(tree)
     static_values = _collect_static_api_values(tree)
     single_frame_names: set[str] = set()
     position_names: set[str] = set()
@@ -370,6 +409,11 @@ def _validate_strategy_api_calls(code: str) -> None:
         if not isinstance(node, ast.Call):
             continue
         call_name, call_owner = _api_call_identity(node)
+        if call_owner == "" and call_name in _UNSUPPORTED_STRATEGY_API_NAMES:
+            replacement = _UNSUPPORTED_STRATEGY_API_NAMES[call_name]
+            raise StrategyV2ContractError(
+                f"strategyV2.apiCallInvalid:{call_name}:use:{replacement}"
+            )
         if call_name in _ORDER_API_ARGUMENTS and call_owner in {"", "context"}:
             _validate_order_call(node, call_name, static_values)
         elif call_name in {"get_history", "history"} and call_owner == "":
@@ -385,6 +429,15 @@ def _validate_strategy_api_calls(code: str) -> None:
             if parent_target:
                 position_names.add(parent_target)
     for node in ast.walk(tree):
+        if (
+            isinstance(node, ast.Attribute)
+            and isinstance(node.value, ast.Name)
+            and node.value.id in position_names
+            and node.attr not in _POSITION_API_ATTRIBUTES
+        ):
+            raise StrategyV2ContractError(
+                f"strategyV2.apiCallInvalid:get_position:unsupportedAttribute:{node.attr}"
+            )
         if isinstance(node, ast.Subscript):
             if isinstance(node.value, ast.Call):
                 call_name, call_owner = _api_call_identity(node.value)
@@ -433,6 +486,77 @@ def _validate_strategy_api_calls(code: str) -> None:
                     raise StrategyV2ContractError(
                         "strategyV2.apiCallInvalid:get_position:returnsPositionObject"
                     )
+
+
+def _validate_initialize_context_params(tree: ast.AST) -> None:
+    for node in tree.body if isinstance(tree, ast.Module) else ():
+        if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) or node.name != "initialize":
+            continue
+        positional = [*node.args.posonlyargs, *node.args.args]
+        context_name = positional[0].arg if positional else "context"
+        for child in ast.walk(node):
+            if (
+                isinstance(child, ast.Attribute)
+                and child.attr == "params"
+                and isinstance(child.value, ast.Name)
+                and child.value.id == context_name
+            ):
+                raise StrategyV2ContractError("strategyV2.initializeParamsUnavailable")
+
+
+def _validate_global_call_names(tree: ast.AST) -> None:
+    defined_names = (
+        set(build_safe_builtins())
+        | _RUNTIME_GLOBAL_CALL_NAMES
+        | set(_UNSUPPORTED_STRATEGY_API_NAMES)
+    )
+    for node in ast.walk(tree):
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            defined_names.add(node.name)
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda)):
+            defined_names.update(arg.arg for arg in node.args.posonlyargs)
+            defined_names.update(arg.arg for arg in node.args.args)
+            defined_names.update(arg.arg for arg in node.args.kwonlyargs)
+            if node.args.vararg:
+                defined_names.add(node.args.vararg.arg)
+            if node.args.kwarg:
+                defined_names.add(node.args.kwarg.arg)
+        if isinstance(node, (ast.Assign, ast.AnnAssign, ast.NamedExpr)):
+            targets = node.targets if isinstance(node, ast.Assign) else [node.target]
+            for target in targets:
+                defined_names.update(_assigned_names(target))
+        if isinstance(node, (ast.For, ast.AsyncFor, ast.comprehension)):
+            defined_names.update(_assigned_names(node.target))
+        if isinstance(node, ast.With):
+            for item in node.items:
+                if item.optional_vars is not None:
+                    defined_names.update(_assigned_names(item.optional_vars))
+        if isinstance(node, ast.ExceptHandler) and node.name:
+            defined_names.add(node.name)
+        if isinstance(node, (ast.Import, ast.ImportFrom)):
+            for alias in node.names:
+                defined_names.add(alias.asname or alias.name.split(".")[0])
+
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call) or not isinstance(node.func, ast.Name):
+            continue
+        call_name = node.func.id
+        if call_name in defined_names:
+            continue
+        raise StrategyV2ContractError(
+            f"strategyV2.apiCallInvalid:{call_name}:undefinedGlobal"
+        )
+
+
+def _assigned_names(node: ast.AST) -> set[str]:
+    if isinstance(node, ast.Name):
+        return {node.id}
+    if isinstance(node, (ast.Tuple, ast.List)):
+        output: set[str] = set()
+        for item in node.elts:
+            output.update(_assigned_names(item))
+        return output
+    return set()
 
 
 def _collect_static_api_values(tree: ast.AST) -> dict[str, tuple[str, int | None]]:

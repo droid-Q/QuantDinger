@@ -51,6 +51,7 @@ MCP_TOOL_NAMES = (
     "get_indicator",
     "create_strategy",
     "update_strategy",
+    "get_strategy_authoring_contract",
     "list_strategy_templates",
     "compile_strategy_code",
     "list_strategy_sources",
@@ -213,7 +214,10 @@ mcp = FastMCP(
         "save_indicator for visual indicator code. Do not backtest indicator code "
         "directly. "
         "STRATEGY WORKFLOW: executable strategies use the Strategy API V2 "
-        "manifest, initialize(context), and handle_data(context, data) contract. "
+        "source-owned manifest, initialize(context), and executable-handler contract. "
+        "Fetch get_strategy_authoring_contract before writing source. The source owns "
+        "its universe, instrument type, frequency, direction, sizing, entries, exits, "
+        "risk rules, and schedules; the run request owns initial capital and date range. "
         "Use list_strategy_templates, compile_strategy_code, and "
         "save_strategy_source before create_strategy. Source versions can be "
         "listed and restored only with explicit confirmation. submit_backtest "
@@ -548,6 +552,12 @@ def update_strategy(strategy_id: int, patch: dict) -> Any:
 
 
 # Strategy API V2 source workspace
+
+
+@mcp.tool()
+def get_strategy_authoring_contract() -> Any:
+    """Fetch the canonical Strategy API V2 runtime contract and starter Python source."""
+    return _get("/api/agent/v1/strategy-sources/authoring-contract")
 
 
 @mcp.tool()

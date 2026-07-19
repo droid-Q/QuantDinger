@@ -322,6 +322,18 @@ MCP_AGENT_TOOLS: tuple[ToolDefinition, ...] = (
         safety="Do not use this as a live-start path.",
     ),
     ToolDefinition(
+        id="mcp.get_strategy_authoring_contract",
+        category="strategy",
+        label_zh="读取 Strategy API V2 开发契约",
+        label_en="Get Strategy API V2 authoring contract",
+        description_zh="读取策略源码归属、运行时 API、禁止项和 starter template。",
+        description_en="Read the source-ownership rules, runtime APIs, forbidden patterns, and starter template.",
+        route="/api/agent/v1/strategy-sources/authoring-contract",
+        produces=("strategy_contract",),
+        risk_level="read",
+        priority=96,
+    ),
+    ToolDefinition(
         id="mcp.list_strategy_templates",
         category="strategy",
         label_zh="List Strategy V2 templates",
@@ -619,7 +631,7 @@ def public_tool_registry(language: str = "zh-CN") -> dict[str, Any]:
         if tool.enabled:
             categories[tool.category] = categories.get(tool.category, 0) + 1
     return {
-        "version": "2026.07.18.1",
+        "version": "2026.07.20.1",
         "total": sum(categories.values()),
         "categories": categories,
         "tools": list_tools(language),

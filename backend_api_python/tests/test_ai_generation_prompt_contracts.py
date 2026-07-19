@@ -47,12 +47,28 @@ def test_strategy_generation_prompt_documents_exact_history_and_order_signatures
     assert "Treat `get_position(symbol)` as a `Position` object" in SCRIPT_STRATEGY_REPAIR_REQUIREMENTS
 
 
+def test_strategy_generation_prompt_rejects_legacy_market_and_position_apis():
+    assert 'data.current(symbol, field="close")' in SCRIPT_STRATEGY_SYSTEM_PROMPT
+    assert "There is no `get_current_data` API" in SCRIPT_STRATEGY_SYSTEM_PROMPT
+    assert "no `.quantity` or `.cost_basis`" in SCRIPT_STRATEGY_SYSTEM_PROMPT
+    assert "Replace every `get_current_data` call" in SCRIPT_STRATEGY_REPAIR_REQUIREMENTS
+    assert "Replace legacy `.quantity` and `.cost_basis`" in SCRIPT_STRATEGY_REPAIR_REQUIREMENTS
+
+
 def test_strategy_generation_prompt_documents_global_schedule_helpers():
     assert "Single-symbol signal strategies normally implement `handle_data(context, data)`" in SCRIPT_STRATEGY_SYSTEM_PROMPT
     assert "global helpers `run_daily(callback, time=\"HH:MM\")`" in SCRIPT_STRATEGY_SYSTEM_PROMPT
     assert "never as `context.run_daily`" in SCRIPT_STRATEGY_SYSTEM_PROMPT
     assert "Schedule helpers are global calls" in SCRIPT_STRATEGY_REPAIR_REQUIREMENTS
     assert "Never call them through `context`" in SCRIPT_STRATEGY_REPAIR_REQUIREMENTS
+
+
+def test_strategy_generation_prompt_documents_parameter_discovery_boundary():
+    assert "# @param <name>" in SCRIPT_STRATEGY_SYSTEM_PROMPT
+    assert 'context.params.get("name", same_default)' in SCRIPT_STRATEGY_SYSTEM_PROMPT
+    assert "discovery context used by `initialize(context)` has no `params`" in SCRIPT_STRATEGY_SYSTEM_PROMPT
+    assert "Never read `context.params` in `initialize`" in SCRIPT_STRATEGY_REPAIR_REQUIREMENTS
+    assert "initial capital, date range, commission, or slippage" in SCRIPT_STRATEGY_REPAIR_REQUIREMENTS
 
 
 def test_indicator_prompt_remains_chart_only():

@@ -184,6 +184,120 @@ def handle_data(context, data):
     assert compile_strategy_v2(code).manifest.primary_frequency == "30m"
 
 
+def test_contract_rejects_undefined_get_current_data_api():
+    code = '''
+def initialize(context):
+    context.set_universe(["Crypto:SOL/USDT@spot"])
+    context.subscribe(frequency="1d")
+
+def handle_data(context, data):
+    price = get_current_data()["Crypto:SOL/USDT@spot"].close
+'''
+    with pytest.raises(
+        StrategyV2ContractError,
+        match=r"strategyV2.apiCallInvalid:get_current_data:use:data\.current",
+    ):
+        compile_strategy_v2(code)
+
+
+@pytest.mark.parametrize("attribute", ["quantity", "cost_basis"])
+def test_contract_rejects_legacy_position_attributes(attribute):
+    code = f'''
+def initialize(context):
+    context.set_universe(["Crypto:SOL/USDT@spot"])
+    context.subscribe(frequency="1d")
+
+def handle_data(context, data):
+    position = get_position("Crypto:SOL/USDT@spot")
+    if position.{attribute} > 0:
+        return
+'''
+    with pytest.raises(
+        StrategyV2ContractError,
+        match=rf"strategyV2.apiCallInvalid:get_position:unsupportedAttribute:{attribute}",
+    ):
+        compile_strategy_v2(code)
+
+
+def test_contract_accepts_data_current_for_scalar_price():
+    code = '''
+def initialize(context):
+    context.set_universe(["Crypto:SOL/USDT@spot"])
+    context.subscribe(frequency="1d")
+
+def handle_data(context, data):
+    price = data.current("Crypto:SOL/USDT@spot", "close")
+    if price <= 0:
+        return
+'''
+    assert compile_strategy_v2(code).manifest.primary_frequency == "1d"
+
+
+def test_contract_rejects_other_undefined_global_calls_before_runtime():
+    code = '''
+def initialize(context):
+    context.set_universe(["Crypto:SOL/USDT@spot"])
+    context.subscribe(frequency="1d")
+
+def handle_data(context, data):
+    price = mystery_price("Crypto:SOL/USDT@spot")
+'''
+    with pytest.raises(
+        StrategyV2ContractError,
+        match="strategyV2.apiCallInvalid:mystery_price:undefinedGlobal",
+    ):
+        compile_strategy_v2(code)
+
+
+def test_contract_accepts_user_defined_helper_calls():
+    code = '''
+def latest_price(data, symbol):
+    return data.current(symbol, "close")
+
+def initialize(context):
+    context.set_universe(["Crypto:SOL/USDT@spot"])
+    context.subscribe(frequency="1d")
+
+def handle_data(context, data):
+    price = latest_price(data, "Crypto:SOL/USDT@spot")
+    if price <= 0:
+        return
+'''
+    assert compile_strategy_v2(code).manifest.primary_frequency == "1d"
+
+
+def test_contract_rejects_runtime_params_during_initialize_discovery():
+    code = '''
+def initialize(context):
+    frequency = context.params.get("frequency", "1d")
+    context.set_universe(["Crypto:SOL/USDT@spot"])
+    context.subscribe(frequency=frequency)
+
+def handle_data(context, data):
+    pass
+'''
+    with pytest.raises(
+        StrategyV2ContractError,
+        match="strategyV2.initializeParamsUnavailable",
+    ):
+        compile_strategy_v2(code)
+
+
+def test_contract_accepts_runtime_params_inside_handler():
+    code = '''
+# @param target_pct float 0.5 Target allocation
+def initialize(context):
+    context.set_universe(["Crypto:SOL/USDT@spot"])
+    context.subscribe(frequency="1d")
+
+def handle_data(context, data):
+    target_pct = float(context.params.get("target_pct", 0.5))
+    if target_pct > 0:
+        order_target_percent("Crypto:SOL/USDT@spot", target_pct)
+'''
+    assert compile_strategy_v2(code).manifest.primary_frequency == "1d"
+
+
 def test_instrument_parser_normalizes_ptrade_and_crypto_symbols():
     assert parse_instrument("600519.XSHG").key == "CNStock:600519.SH"
     assert parse_instrument("USStock:MSFT").key == "USStock:MSFT"

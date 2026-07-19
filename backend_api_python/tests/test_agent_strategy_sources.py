@@ -6,6 +6,8 @@ from types import SimpleNamespace
 import pytest
 
 from app.routes.agent_v1 import strategy_sources
+from app.services.strategy_authoring import get_strategy_authoring_contract
+from app.services.strategy_v2 import compile_strategy_v2
 from app.utils import agent_auth
 
 
@@ -131,6 +133,32 @@ def test_strategy_source_compile_and_create(client, monkeypatch, source_service)
     assert source_service.created["visibility"] == "private"
     assert source_service.created["status"] == "draft"
     assert source_service.created["metadata"]["contract"] == "v2"
+
+
+def test_strategy_authoring_contract_is_source_owned(client, monkeypatch):
+    _authorize(monkeypatch, "R")
+
+    response = client.get(
+        "/api/agent/v1/strategy-sources/authoring-contract",
+        headers=_headers(),
+    )
+
+    assert response.status_code == 200
+    data = response.get_json()["data"]
+    assert data["version"].startswith("strategy-api-v2")
+    assert "frequency" in data["ownership"]["source"]
+    assert "initial_capital" in data["ownership"]["run_panel"]
+    assert "get_current_data" in " ".join(data["forbidden"])
+    assert "context.set_universe" in data["starter_template"]
+
+
+def test_strategy_authoring_starter_compiles_with_strategy_v2():
+    contract = get_strategy_authoring_contract()
+
+    compiled = compile_strategy_v2(contract["starter_template"])
+
+    assert compiled.manifest.strategy_type == "cta"
+    assert compiled.manifest.subscriptions[0].frequency == "1d"
 
 
 def test_strategy_source_list_omits_code_and_detail_masks_hidden(client, monkeypatch, source_service):

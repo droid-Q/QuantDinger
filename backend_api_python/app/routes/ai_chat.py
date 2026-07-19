@@ -214,7 +214,10 @@ def _fallback_agent_intent(
         "entities": {
             "symbol": selected_symbol,
             "market": (context or {}).get("market") or (context or {}).get("resolved_market") or "",
-            "timeframe": "",
+            "timeframe": (context or {}).get("timeframe") or "",
+            "exchange_id": (context or {}).get("exchange_id") or (context or {}).get("exchangeId") or "",
+            "market_type": (context or {}).get("market_type") or (context or {}).get("marketType") or "",
+            "instrument_id": (context or {}).get("instrument_id") or (context or {}).get("instrumentId") or "",
             "strategy_template": "",
         },
         "skills": [skill.to_public(language) for skill in match_skills(message, base_intent, limit=5)],
@@ -254,7 +257,10 @@ def _normalize_agent_intent(raw: dict, message: str, has_image: bool, context: d
     entities = {
         "symbol": str(entities.get("symbol") or selected_symbol or "").strip(),
         "market": str(entities.get("market") or selected_market or "").strip(),
-        "timeframe": str(entities.get("timeframe") or "").strip(),
+        "timeframe": str(entities.get("timeframe") or context.get("timeframe") or "").strip(),
+        "exchange_id": str(entities.get("exchange_id") or context.get("exchange_id") or context.get("exchangeId") or "").strip(),
+        "market_type": str(entities.get("market_type") or context.get("market_type") or context.get("marketType") or "").strip(),
+        "instrument_id": str(entities.get("instrument_id") or context.get("instrument_id") or context.get("instrumentId") or "").strip(),
         "strategy_template": str(entities.get("strategy_template") or "").strip(),
         "asset_class": str(entities.get("asset_class") or "").strip(),
     }
@@ -307,6 +313,7 @@ def _classify_agent_intent(message: str, attachments: list[dict], context: dict,
         "workflow such as indicator creation, strategy creation, backtest, or scheduled analysis. "
         "For creation, use indicator_ide only for chart-only indicators and visual overlays. "
         "Use script_strategy for executable Strategy API V2 sources, backtestable strategies, live strategies, robots, or template-style requests. "
+        "Preserve selected timeframe, exchange_id, market_type, and instrument_id in entities. A missing timeframe is not blocking for strategy creation because the source generator chooses a conservative source-owned default. "
         "If the user asks to create/build/write/generate a runnable strategy and enough target context "
         "is available, set should_execute=true. If required data is missing, list it in required_missing. "
         "Support every configured UI language and mixed multilingual prompts."
@@ -323,6 +330,9 @@ def _classify_agent_intent(message: str, attachments: list[dict], context: dict,
             "symbol": "",
             "market": "",
             "timeframe": "",
+            "exchange_id": "",
+            "market_type": "",
+            "instrument_id": "",
             "strategy_template": "",
             "asset_class": "",
         },
@@ -339,6 +349,10 @@ def _classify_agent_intent(message: str, attachments: list[dict], context: dict,
             "symbol": context.get("symbol") or context.get("selected_symbol") or "",
             "resolved_market": context.get("resolved_market") or "",
             "resolved_symbol": context.get("resolved_symbol") or "",
+            "timeframe": context.get("timeframe") or "",
+            "exchange_id": context.get("exchange_id") or context.get("exchangeId") or "",
+            "market_type": context.get("market_type") or context.get("marketType") or "",
+            "instrument_id": context.get("instrument_id") or context.get("instrumentId") or "",
         },
         "available_intents": [
             "general", "market_analysis", "chart_image_analysis", "strategy_build",

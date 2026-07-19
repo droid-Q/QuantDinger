@@ -4,6 +4,7 @@ from __future__ import annotations
 from typing import Any
 
 from app.services.script_source import get_script_source_service
+from app.services.strategy_authoring import get_strategy_authoring_contract
 from app.services.strategy_v2 import canonical_source_metadata, compile_strategy_v2
 from app.utils.agent_auth import SCOPE_R, SCOPE_W, agent_required, current_user_id
 from app.utils.logger import get_logger
@@ -28,6 +29,13 @@ _LIST_FIELDS = (
     "created_at",
     "updated_at",
 )
+
+
+@agent_v1_bp.route("/strategy-sources/authoring-contract", methods=["GET"])
+@agent_required(SCOPE_R)
+def strategy_authoring_contract():
+    """Return the canonical Strategy API V2 contract and starter source."""
+    return envelope(get_strategy_authoring_contract())
 
 
 def _is_hidden_source(item: dict | None) -> bool:

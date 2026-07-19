@@ -293,6 +293,13 @@
         "responses": { "200": { "description": "Stopped" }, "404": { "description": "Strategy not found" } }
       }
     },
+    "/api/agent/v1/strategy-sources/authoring-contract": {
+      "get": {
+        "summary": "Canonical Strategy API V2 authoring contract and starter source",
+        "x-scope-class": "R",
+        "responses": { "200": { "description": "OK" } }
+      }
+    },
     "/api/agent/v1/strategy-sources/templates": {
       "get": {
         "summary": "List system Strategy API V2 templates with starter source",

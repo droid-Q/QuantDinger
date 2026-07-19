@@ -5,6 +5,7 @@ from app.routes.ai_chat import (
     _build_system_prompt,
     _fallback_agent_intent,
     _format_kline_time_utc,
+    _normalize_agent_intent,
     _summarize_klines,
 )
 
@@ -80,3 +81,39 @@ def test_agent_fallback_executes_indicator_workflow_in_ui_languages(locale, mess
     assert plan["should_execute"] is True
     assert plan["target_type"] == "indicator"
     assert plan["workflow"] == "indicator_ide"
+
+
+def test_agent_intent_preserves_strategy_instrument_context():
+    context = {
+        "market": "Crypto",
+        "symbol": "SOL/USDT",
+        "timeframe": "4H",
+        "exchange_id": "okx",
+        "market_type": "swap",
+        "instrument_id": "SOL-USDT-SWAP",
+    }
+    fallback = _fallback_agent_intent(
+        "Create a runnable Python strategy",
+        False,
+        context,
+        "en-US",
+    )
+    normalized = _normalize_agent_intent(
+        {
+            "intent": "strategy_build",
+            "target_type": "script",
+            "workflow": "script_strategy",
+            "should_execute": True,
+            "entities": {},
+        },
+        "Create a runnable Python strategy",
+        False,
+        context,
+        "en-US",
+    )
+
+    for plan in (fallback, normalized):
+        assert plan["entities"]["timeframe"] == "4H"
+        assert plan["entities"]["exchange_id"] == "okx"
+        assert plan["entities"]["market_type"] == "swap"
+        assert plan["entities"]["instrument_id"] == "SOL-USDT-SWAP"
