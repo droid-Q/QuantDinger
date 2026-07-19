@@ -134,19 +134,36 @@ function Download-Files {
 }
 
 function Collect-Settings {
-    $script:AdminUser = Read-Value "Admin username" ((Get-EnvValue $BackendEnv "ADMIN_USER") -replace '^$', 'quantdinger')
-    $script:AdminEmail = Read-Value "Admin email (optional)" (Get-EnvValue $BackendEnv "ADMIN_EMAIL")
-
+    $existingUser = Get-EnvValue $BackendEnv "ADMIN_USER"
     $existingPassword = Get-EnvValue $BackendEnv "ADMIN_PASSWORD"
-    if ($existingPassword -and $existingPassword -ne "123456") {
-        $entered = Read-SecretPlain "Admin password (leave blank to keep existing)"
-        if ($entered) { $script:AdminPassword = $entered } else { $script:AdminPassword = $existingPassword }
+    $script:AdminCredentialsReused = $false
+    if (
+        $existingPassword -and
+        $existingPassword -ne "123456" -and
+        $existingUser.Length -ge 3 -and
+        $existingUser.Length -le 50 -and
+        $existingPassword.Length -ge 6
+    ) {
+        $script:AdminUser = $existingUser
+        $script:AdminPassword = $existingPassword
+        $script:AdminCredentialsReused = $true
+        Write-Host "Existing administrator credentials detected; keeping the configured username and password." -ForegroundColor Yellow
+        Write-Host "Change administrator credentials from Profile after signing in."
     } else {
+        while ($true) {
+            $script:AdminUser = Read-Value "Admin username" ($existingUser -replace '^$', 'quantdinger')
+            if ($AdminUser.Length -lt 3 -or $AdminUser.Length -gt 50) {
+                Write-Host "Admin username must be 3-50 characters." -ForegroundColor Red
+                continue
+            }
+            break
+        }
+
         while ($true) {
             $pass1 = Read-SecretPlain "Admin password"
             $pass2 = Read-SecretPlain "Confirm admin password"
-            if (-not $pass1) {
-                Write-Host "Admin password cannot be empty." -ForegroundColor Red
+            if ($pass1.Length -lt 6) {
+                Write-Host "Admin password must be at least 6 characters." -ForegroundColor Red
                 continue
             }
             if ($pass1 -eq "123456") {
@@ -161,6 +178,7 @@ function Collect-Settings {
             break
         }
     }
+    $script:AdminEmail = Read-Value "Admin email (optional)" (Get-EnvValue $BackendEnv "ADMIN_EMAIL")
 
     $script:FrontendPort = Read-Value "Frontend port" ((Get-EnvValue $RootEnv "FRONTEND_PORT") -replace '^$', '8888')
     $script:MobilePort = Read-Value "Mobile H5 port" ((Get-EnvValue $RootEnv "MOBILE_PORT") -replace '^$', '8889')
@@ -208,8 +226,14 @@ function Write-Settings {
 function Start-Stack {
     Write-Host "Pulling images..." -ForegroundColor Yellow
     docker compose -f $ComposeFile pull
+    if ($LASTEXITCODE -ne 0) {
+        Fail "Docker Compose could not pull the required images."
+    }
     Write-Host "Starting services..." -ForegroundColor Yellow
     docker compose -f $ComposeFile up -d
+    if ($LASTEXITCODE -ne 0) {
+        Fail "Docker Compose could not start the services."
+    }
 }
 
 function Wait-ForBackend {
@@ -226,9 +250,10 @@ function Wait-ForBackend {
             Start-Sleep -Seconds 2
         }
     }
-    Write-Host "Backend is still starting. Check logs with:" -ForegroundColor Yellow
+    Write-Host "Backend did not become healthy within the expected startup window. Check logs with:" -ForegroundColor Red
     Write-Host "  cd $InstallDir"
     Write-Host "  docker compose -f $ComposeFile logs -f backend"
+    Fail "Installation did not complete successfully."
 }
 
 function Print-Summary {
@@ -241,7 +266,11 @@ function Print-Summary {
     Write-Host "API:         http://127.0.0.1:$apiPort"
     Write-Host "Directory:   $InstallDir"
     Write-Host "Username:    $AdminUser"
-    Write-Host "Password:    the password you entered during installation"
+    if ($AdminCredentialsReused) {
+        Write-Host "Password:    existing administrator password"
+    } else {
+        Write-Host "Password:    the password you entered during installation"
+    }
     Write-Host ""
     Write-Host "Useful commands:"
     Write-Host "  cd $InstallDir"

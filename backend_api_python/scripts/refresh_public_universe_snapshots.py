@@ -34,6 +34,29 @@ HK_FACTSHEETS = {
     "hk_high_dividend50": ("hshdyie", 50),
 }
 
+CURATED_ETF_SYMBOLS = {
+    "HKStock": (
+        "02800", "02801", "02823", "02828", "02840", "02846", "03032", "03033", "03037",
+        "03040", "03067", "03075", "03088", "03110", "03188", "03191", "03416", "03437",
+    ),
+    "USStock": (
+        "SPY", "QQQ", "IWM", "DIA", "VTI", "VOO", "IVV", "EFA", "EEM", "AGG", "BND", "TLT",
+        "IEF", "GLD", "SLV", "USO", "XLF", "XLK", "XLE", "XLV", "XLI", "XLY", "XLP", "XLU",
+        "VNQ", "ARKK", "HYG", "LQD", "SCHD", "VUG", "VTV",
+    ),
+}
+
+EXPECTED_MEMBER_COUNTS = {
+    "csi300": (300, 300),
+    "csi500": (500, 500),
+    "sp500": (500, 510),
+    "nasdaq100": (100, 102),
+    "crypto_top100": (95, 100),
+    "hk_etf": (1, 1000),
+    "us_etf": (1, 1000),
+    **{code: (count, count) for code, (_factsheet, count) in HK_FACTSHEETS.items()},
+}
+
 HK_INDUSTRIES = (
     "Properties & Construction",
     "Consumer Discretionary",
@@ -191,9 +214,19 @@ def crypto_top100() -> list[dict]:
 
 
 def symbol_master_etfs(market: str) -> list[dict]:
-    """Build an ETF snapshot from the synchronized symbol master."""
+    """Build an ETF snapshot and repair legacy curated ETF metadata."""
     with get_db_connection() as db:
         cur = db.cursor()
+        curated = list(CURATED_ETF_SYMBOLS.get(market, ()))
+        if curated:
+            cur.execute(
+                """
+                UPDATE qd_market_symbols
+                SET asset_class = 'etf', is_hot = 1, sort_order = GREATEST(sort_order, 80)
+                WHERE market = ? AND symbol = ANY(?)
+                """,
+                (market, curated),
+            )
         cur.execute(
             """
             SELECT market, symbol, name
@@ -204,6 +237,7 @@ def symbol_master_etfs(market: str) -> list[dict]:
             (market,),
         )
         rows = cur.fetchall() or []
+        db.commit()
         cur.close()
     return [
         {
@@ -347,13 +381,7 @@ def main() -> int:
         if loader is None:
             raise RuntimeError(f"unsupported universe: {code}")
         members = loader()
-        expected = {
-            "csi300": (300, 300), "csi500": (500, 500), "sp500": (500, 510),
-            "nasdaq100": (100, 102), "crypto_top100": (95, 100),
-            "hk_etf": (1, 1000), "us_etf": (1, 1000),
-            **{code: (count, count) for code, (_factsheet, count) in HK_FACTSHEETS.items()},
-        }
-        minimum, maximum = expected[code]
+        minimum, maximum = EXPECTED_MEMBER_COUNTS[code]
         if not minimum <= len({item.get("symbol") for item in members}) <= maximum:
             raise RuntimeError(f"{code} member count failed validation: {len(members)}")
         results.append(apply_snapshot(code, members, as_of, dry_run=args.dry_run))

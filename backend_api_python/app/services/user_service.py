@@ -61,6 +61,7 @@ class UserService:
     """User management service"""
 
     _password_changed_column_ready = False
+    BOOTSTRAP_DEFAULT_USERNAME = 'quantdinger'
     BOOTSTRAP_DEFAULT_PASSWORD = '123456'
     
     # Available roles (ordered by privilege level)
@@ -180,14 +181,14 @@ class UserService:
             sync_env_password: env ADMIN_PASSWORD is non-default but DB still has 123456
             mark_changed: DB password is non-default, but password_changed_at was never set
         """
-        if password_changed_at is not None:
-            return 'ok'
         if not str(password_hash or '').strip():
             return 'ok'
         if self._password_hash_matches_bootstrap_default(password_hash):
             if self._configured_admin_password_is_default():
                 return 'must_change'
             return 'sync_env_password'
+        if password_changed_at is not None:
+            return 'ok'
         return 'mark_changed'
 
     def _sync_bootstrap_admin_password_from_env(self, user_id: int, password_hash: str) -> bool:
@@ -259,6 +260,109 @@ class UserService:
         except Exception as e:
             logger.warning(f"sync_bootstrap_admin_password_from_env failed: {e}")
             return False
+
+    def sync_bootstrap_admin_credentials_from_env(self) -> Dict[str, Any]:
+        """
+        Replace an untouched legacy bootstrap admin with configured credentials.
+
+        This migration is deliberately narrow: only the first active admin account
+        is eligible, its username must still be the legacy default (or already match
+        ADMIN_USER), and its password hash must still verify as 123456. Accounts with
+        a user-chosen password are never overwritten.
+        """
+        admin_username = self._configured_admin_username()
+        admin_password = self._configured_admin_password()
+        admin_email = self._normalize_email(self._configured_admin_email())
+
+        if len(admin_username) < 3 or len(admin_username) > 50:
+            return {'synced': False, 'reason': 'invalid_configured_username'}
+        if len(admin_password) < 6 or len(admin_password.encode('utf-8')) > 72:
+            return {'synced': False, 'reason': 'invalid_configured_password'}
+        if self._is_bootstrap_default_plain_password(admin_password):
+            return {'synced': False, 'reason': 'configured_password_is_default'}
+
+        try:
+            with get_db_connection() as db:
+                cur = db.cursor()
+                cur.execute(
+                    """
+                    SELECT id, username, password_hash, email, role, status
+                    FROM qd_users
+                    WHERE id = (SELECT MIN(id) FROM qd_users)
+                    FOR UPDATE
+                    """
+                )
+                user = cur.fetchone()
+                if not user:
+                    cur.close()
+                    return {'synced': False, 'reason': 'bootstrap_user_not_found'}
+
+                user_id = int(user.get('id'))
+                current_username = str(user.get('username') or '')
+                if user.get('role') != 'admin' or user.get('status') != 'active':
+                    cur.close()
+                    return {'synced': False, 'reason': 'bootstrap_user_not_active_admin'}
+                if current_username not in {self.BOOTSTRAP_DEFAULT_USERNAME, admin_username}:
+                    cur.close()
+                    return {'synced': False, 'reason': 'bootstrap_username_was_customized'}
+                if not self._password_hash_matches_bootstrap_default(user.get('password_hash')):
+                    cur.close()
+                    return {'synced': False, 'reason': 'bootstrap_password_was_customized'}
+
+                if current_username != admin_username:
+                    cur.execute(
+                        "SELECT id FROM qd_users WHERE username = ? AND id <> ?",
+                        (admin_username, user_id),
+                    )
+                    if cur.fetchone():
+                        cur.close()
+                        return {'synced': False, 'reason': 'configured_username_in_use'}
+
+                email_to_store = user.get('email')
+                email_verified = False
+                if admin_email and _EMAIL_RE.match(admin_email):
+                    cur.execute(
+                        "SELECT id FROM qd_users WHERE LOWER(email) = LOWER(?) AND id <> ?",
+                        (admin_email, user_id),
+                    )
+                    if not cur.fetchone():
+                        email_to_store = admin_email
+                        email_verified = True
+
+                new_hash = self.hash_password(admin_password)
+                cur.execute(
+                    """
+                    UPDATE qd_users
+                    SET username = ?, password_hash = ?, email = ?,
+                        email_verified = CASE WHEN ? THEN TRUE ELSE email_verified END,
+                        password_changed_at = NOW(),
+                        token_version = COALESCE(token_version, 1) + 1,
+                        updated_at = NOW()
+                    WHERE id = ?
+                    """,
+                    (
+                        admin_username,
+                        new_hash,
+                        email_to_store,
+                        email_verified,
+                        user_id,
+                    ),
+                )
+                db.commit()
+                cur.close()
+
+            logger.info(
+                "Synchronized legacy bootstrap administrator credentials from configuration"
+            )
+            return {
+                'synced': True,
+                'reason': 'legacy_default_replaced',
+                'user_id': user_id,
+                'username': admin_username,
+            }
+        except Exception as e:
+            logger.warning(f"sync_bootstrap_admin_credentials_from_env failed: {e}")
+            return {'synced': False, 'reason': 'database_error'}
 
     def sync_admin_email_from_config(
         self,
@@ -1031,7 +1135,7 @@ class UserService:
                     })
                     logger.info(f"Created admin user: {admin_user} ({admin_email})")
                 else:
-                    self.sync_bootstrap_admin_password_from_env()
+                    self.sync_bootstrap_admin_credentials_from_env()
                     self.sync_admin_email_from_config(overwrite_existing=False)
         except Exception as e:
             logger.error(f"ensure_admin_exists failed: {e}")

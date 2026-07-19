@@ -27,7 +27,7 @@ def fresh_module(monkeypatch):
 
 
 def test_mcp_tool_registry_complete(fresh_module):
-    assert len(fresh_module.MCP_TOOL_NAMES) == 25
+    assert len(fresh_module.MCP_TOOL_NAMES) == 33
     # Every exported name should correspond to a registered @mcp.tool function.
     for name in fresh_module.MCP_TOOL_NAMES:
         assert hasattr(fresh_module, name), f"missing tool function: {name}"
@@ -41,6 +41,12 @@ def test_package_version_matches_pyproject():
     match = re.search(r'^version = "([^"]+)"$', project, re.MULTILINE)
     assert match
     assert __version__ == match.group(1)
+
+
+def test_protocol_server_version_matches_package(fresh_module):
+    from quantdinger_mcp import __version__
+
+    assert fresh_module.mcp._mcp_server.version == __version__
 
 
 def test_create_strategy_uses_canonical_deployment_payload(monkeypatch, fresh_module):
@@ -153,6 +159,47 @@ def test_submit_backtest_uses_strategy_v2_payload(monkeypatch, fresh_module):
     assert captured["headers"] == {"Idempotency-Key": "same-key"}
 
 
+def test_strategy_source_workspace_payloads(monkeypatch, fresh_module):
+    calls = []
+
+    monkeypatch.setattr(
+        fresh_module,
+        "_post",
+        lambda path, json=None, headers=None: calls.append(("POST", path, json)) or {"ok": True},
+    )
+    monkeypatch.setattr(
+        fresh_module,
+        "_patch",
+        lambda path, json=None: calls.append(("PATCH", path, json)) or {"ok": True},
+    )
+
+    fresh_module.save_strategy_source(
+        "SPY trend",
+        "def initialize(context):\n    pass\n",
+        param_schema={"lookback": {"type": "integer"}},
+    )
+    fresh_module.save_strategy_source(
+        "SPY trend v2",
+        "def initialize(context):\n    pass\n",
+        source_id=12,
+    )
+    fresh_module.restore_strategy_source_version(12, 44, confirm_restore=True)
+
+    assert calls[0][0:2] == ("POST", "/api/agent/v1/strategy-sources")
+    assert calls[0][2]["param_schema"]["lookback"]["type"] == "integer"
+    assert calls[1][0:2] == ("PATCH", "/api/agent/v1/strategy-sources/12")
+    assert calls[2] == (
+        "POST",
+        "/api/agent/v1/strategy-sources/12/versions/44/restore",
+        {"confirm": True},
+    )
+
+
+def test_source_restore_and_paper_cancel_require_confirmation(fresh_module):
+    assert fresh_module.restore_strategy_source_version(1, 2)["error"] is True
+    assert fresh_module.cancel_open_paper_orders()["error"] is True
+
+
 def test_parse_sse_chunk():
     from quantdinger_mcp.security import parse_sse_chunk
 
@@ -166,3 +213,11 @@ def test_parse_sse_chunk():
     assert frames[0][0] == "snapshot"
     assert frames[1][0] == "result"
     assert frames[1][1]["status"] == "succeeded"
+
+
+def test_redaction_handles_camel_case_and_deep_values():
+    from quantdinger_mcp.security import redact_secrets
+
+    assert redact_secrets({"clientSecret": "hidden"})["clientSecret"] == "***"
+    deep = {"a": {"b": {"c": {"d": {"e": {"f": {"g": {"value": "hidden"}}}}}}}}
+    assert "hidden" not in repr(redact_secrets(deep))

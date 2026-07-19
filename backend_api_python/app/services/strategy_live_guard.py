@@ -10,6 +10,8 @@ logger = get_logger(__name__)
 
 def normalize_strategy_position_side(value: Any) -> str:
     side = str(value or "").strip().lower()
+    if side in {"neutral", "hedged", "both", "dual"}:
+        return "neutral"
     if side in {"long", "buy", "1", "+1"}:
         return "long"
     if side in {"short", "sell", "-1"}:
@@ -18,7 +20,7 @@ def normalize_strategy_position_side(value: Any) -> str:
 
 
 def resolve_strategy_position_side(strategy: Dict[str, Any]) -> str:
-    """Resolve the single position leg owned by a live strategy."""
+    """Resolve the position leg or dual-leg ownership of a live strategy."""
     trading_config = strategy.get("trading_config") if isinstance(strategy.get("trading_config"), dict) else {}
     market_type = str(
         trading_config.get("market_type")

@@ -123,7 +123,17 @@ class TradingExecutor:
             return
 
         position_side = resolve_strategy_position_side(strategy)
-        if position_side not in {"long", "short"}:
+        bot_type = str(trading_config.get("bot_type") or "").strip().lower()
+        bot_params = (
+            trading_config.get("bot_params")
+            if isinstance(trading_config.get("bot_params"), dict)
+            else {}
+        )
+        grid_direction = str(
+            bot_params.get("gridDirection") or bot_params.get("grid_direction") or ""
+        ).strip().lower()
+        neutral_grid = bot_type == "grid" and grid_direction == "neutral"
+        if position_side not in {"long", "short"} and not neutral_grid:
             raise RuntimeError("strategyV2.positionSideRequired")
 
         from app.services.exchange_execution import resolve_exchange_config
@@ -141,13 +151,15 @@ class TradingExecutor:
             market_type=market_type,
             exchange_config=exchange_config,
         )
+        if neutral_grid and is_hedge is not True:
+            raise RuntimeError(f"strategyV2.neutralGridHedgeModeRequired:{label}")
         if is_hedge is not True:
             if is_hedge is None:
                 raise RuntimeError(f"strategyV2.hedgeModeUnknown:{label}")
         conflict = find_live_strategy_conflict(
             strategy,
             user_id,
-            allow_opposite_leg=is_hedge is True,
+            allow_opposite_leg=is_hedge is True and not neutral_grid,
         )
         if conflict:
             raise RuntimeError(live_conflict_message(conflict))
@@ -393,6 +405,7 @@ class TradingExecutor:
                 initial_capital=initial_capital,
                 params=dict(trading_config.get("params") or {}),
                 universe_resolver=resolve_universe,
+                schedule_timezone=self._load_schedule_timezone(user_id),
             )
             primary = candidates[0]
             runtime_run = ensure_strategy_run(
@@ -502,7 +515,7 @@ class TradingExecutor:
                                 notification_config=notification_config,
                                 trading_config=trading_config,
                                 exchange_config=exchange_config,
-                                signal_ts=int(timestamp.timestamp()),
+                                signal_ts=self._intent_signal_timestamp(intent, timestamp),
                                 strategy_run_id=run_id,
                             )
                         next_signal_poll = cycle_started + signal_poll
@@ -573,6 +586,12 @@ class TradingExecutor:
 
         symbol = str(member.get("symbol") or "")
         positions = self._get_current_positions(strategy_id, symbol)
+        intent_position_side = str(intent.position_side or "").strip().lower()
+        if intent_position_side in {"long", "short"}:
+            positions = [
+                item for item in positions
+                if str(item.get("side") or "").strip().lower() == intent_position_side
+            ]
         current_amount = sum(
             (-1.0 if str(item.get("side") or "").lower() == "short" else 1.0)
             * float(item.get("size") or 0)
@@ -737,10 +756,18 @@ class TradingExecutor:
                 price_exchange_id=exchange_id,
             )
 
+        key = str(primary.get("key") or "")
+        frame = frames.get(key)
+        initial_prices = self._live_prices(candidates)
+        initial_price = float(initial_prices.get(key) or 0)
+        if initial_price <= 0 and frame is not None and not frame.empty:
+            initial_price = float(frame["close"].iloc[-1])
+        runtime_grid_config = self._materialize_grid_anchor(trading_config, initial_price)
+
         runner = GridRestingRunner(
             strategy_id,
             symbol,
-            trading_config,
+            runtime_grid_config,
             exchange_config,
             user_id=int((self._load_strategy(strategy_id) or {}).get("user_id") or 1),
             initial_capital=initial_capital,
@@ -750,17 +777,11 @@ class TradingExecutor:
                 strategy_id=strategy_id,
                 symbol=symbol,
                 current_price=float(price),
-                trading_config=trading_config,
+                trading_config=runtime_grid_config,
                 timeframe_seconds=60,
                 initial_capital=initial_capital,
             ),
         )
-        key = str(primary.get("key") or "")
-        frame = frames.get(key)
-        initial_prices = self._live_prices(candidates)
-        initial_price = float(initial_prices.get(key) or 0)
-        if initial_price <= 0 and frame is not None and not frame.empty:
-            initial_price = float(frame["close"].iloc[-1])
         ok, message = runner.startup(initial_price, bars_df=frame)
         if not ok:
             raise RuntimeError(f"grid.startupFailed:{message}")
@@ -783,6 +804,30 @@ class TradingExecutor:
                 time.sleep(tick_seconds)
         finally:
             runner.shutdown()
+
+    @staticmethod
+    def _materialize_grid_anchor(
+        trading_config: Dict[str, Any],
+        initial_price: float,
+    ) -> Dict[str, Any]:
+        runtime_config = dict(trading_config or {})
+        grid_params = (
+            dict(runtime_config.get("bot_params") or {})
+            if isinstance(runtime_config.get("bot_params"), dict)
+            else {}
+        )
+        if not bool(grid_params.get("dynamicAnchor")) or initial_price <= 0:
+            return runtime_config
+        lower_ratio = float(grid_params.get("lowerPrice") or 0.0)
+        upper_ratio = float(grid_params.get("upperPrice") or 0.0)
+        reference = (lower_ratio + upper_ratio) / 2.0
+        if lower_ratio <= 0 or upper_ratio <= 0 or reference <= 0:
+            return runtime_config
+        grid_params["lowerPrice"] = initial_price * lower_ratio / reference
+        grid_params["upperPrice"] = initial_price * upper_ratio / reference
+        grid_params["dynamicAnchor"] = False
+        runtime_config["bot_params"] = grid_params
+        return runtime_config
 
     @staticmethod
     def _to_ratio(value: Any) -> float:
@@ -1122,6 +1167,29 @@ class TradingExecutor:
         for key in ("trading_config", "exchange_config", "notification_config"):
             row[key] = _json_object(row.get(key))
         return row
+
+    @staticmethod
+    def _load_schedule_timezone(user_id: int) -> str:
+        fallback = str(os.getenv("TZ") or "UTC").strip() or "UTC"
+        try:
+            with get_db_connection() as db:
+                cur = db.cursor()
+                cur.execute(
+                    "SELECT COALESCE(timezone, '') AS timezone FROM qd_users WHERE id = %s",
+                    (int(user_id),),
+                )
+                row = cur.fetchone() or {}
+                cur.close()
+            return str(row.get("timezone") or fallback).strip() or fallback
+        except Exception:
+            return fallback
+
+    @staticmethod
+    def _intent_signal_timestamp(intent: OrderIntent, fallback: Any) -> int:
+        value = pd.Timestamp(intent.signal_time if intent.signal_time is not None else fallback)
+        if value.tzinfo is None:
+            value = value.tz_localize("UTC")
+        return int(value.timestamp())
 
     @staticmethod
     def _load_source(strategy: dict[str, Any]) -> tuple[int, str]:

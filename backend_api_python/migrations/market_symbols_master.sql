@@ -22173,6 +22173,21 @@ ON CONFLICT (market, symbol, exchange, market_type, instrument_id) DO UPDATE
       currency = COALESCE(NULLIF(EXCLUDED.currency, ''), qd_market_symbols.currency),
       is_active = 1;
 
+UPDATE qd_market_symbols
+SET asset_class = 'etf', is_hot = 1, sort_order = GREATEST(sort_order, 80)
+WHERE market = 'HKStock' AND symbol IN (
+  '02800','02801','02823','02828','02840','02846','03032','03033','03037',
+  '03040','03067','03075','03088','03110','03188','03191','03416','03437'
+);
+
+UPDATE qd_market_symbols
+SET asset_class = 'etf', is_hot = 1, sort_order = GREATEST(sort_order, 80)
+WHERE market = 'USStock' AND symbol IN (
+  'SPY','QQQ','IWM','DIA','VTI','VOO','IVV','EFA','EEM','AGG','BND','TLT','IEF',
+  'GLD','SLV','USO','XLF','XLK','XLE','XLV','XLI','XLY','XLP','XLU','VNQ','ARKK',
+  'HYG','LQD','SCHD','VUG','VTV'
+);
+
 CREATE TABLE IF NOT EXISTS qd_market_symbol_aliases (
     id SERIAL PRIMARY KEY,
     market VARCHAR(50) NOT NULL,

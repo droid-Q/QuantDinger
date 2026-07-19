@@ -97,6 +97,18 @@ STATIC_MARKET_ROWS: List[Row] = [
     ("MOEX", "PLZL", "Polyus", "MOEX", "RUB"),
 ]
 
+CURATED_ETF_SYMBOLS = {
+    "HKStock": (
+        "02800", "02801", "02823", "02828", "02840", "02846", "03032", "03033", "03037",
+        "03040", "03067", "03075", "03088", "03110", "03188", "03191", "03416", "03437",
+    ),
+    "USStock": (
+        "SPY", "QQQ", "IWM", "DIA", "VTI", "VOO", "IVV", "EFA", "EEM", "AGG", "BND", "TLT",
+        "IEF", "GLD", "SLV", "USO", "XLF", "XLK", "XLE", "XLV", "XLI", "XLY", "XLP", "XLU",
+        "VNQ", "ARKK", "HYG", "LQD", "SCHD", "VUG", "VTV",
+    ),
+}
+
 
 def clean(value: object) -> str:
     return str(value or "").strip()
@@ -313,6 +325,14 @@ def build_sql(rows: List[Row], notes: List[str]) -> str:
         "      is_active = 1;",
         "",
     ])
+    for market, symbols in CURATED_ETF_SYMBOLS.items():
+        quoted_symbols = ",".join(sql_quote(symbol) for symbol in symbols)
+        out.extend([
+            "UPDATE qd_market_symbols",
+            "SET asset_class = 'etf', is_hot = 1, sort_order = GREATEST(sort_order, 80)",
+            f"WHERE market = {sql_quote(market)} AND symbol IN ({quoted_symbols});",
+            "",
+        ])
     return "\n".join(out)
 
 

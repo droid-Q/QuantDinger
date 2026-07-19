@@ -48,6 +48,7 @@ BACKEND_PORT_VALUE=""
 POSTGRES_PASSWORD_VALUE=""
 IMAGE_PREFIX_VALUE=""
 SECRET_KEY_VALUE=""
+ADMIN_CREDENTIALS_REUSED="false"
 
 say() {
     printf '%b\n' "$1"
@@ -108,17 +109,29 @@ read_secret() {
     read_secret_from_terminal
 }
 
-read_secret_optional() {
-    prompt="$1"
-    printf '%b' "${CYAN}${prompt}: ${NC}" >&2
-    read_secret_from_terminal
-}
-
 env_get() {
     file="$1"
     key="$2"
     [ -f "$file" ] || return 0
-    grep -E "^${key}=" "$file" | tail -n 1 | cut -d= -f2- || true
+    raw_value=$(grep -E "^${key}=" "$file" | tail -n 1 | cut -d= -f2- || true)
+
+    # Decode values previously written by env_set_quoted. This is intentionally
+    # limited to dotenv's basic quote escapes; environment files are never sourced.
+    case "$raw_value" in
+        \"*\")
+            raw_value=${raw_value#\"}
+            raw_value=${raw_value%\"}
+            printf '%s' "$raw_value" | sed -e 's/\\\"/"/g' -e 's/\\\\/\\/g'
+            ;;
+        \'*\')
+            raw_value=${raw_value#\'}
+            raw_value=${raw_value%\'}
+            printf '%s' "$raw_value" | sed -e "s/\\\\'/'/g" -e 's/\\\\/\\/g'
+            ;;
+        *)
+            printf '%s' "$raw_value"
+            ;;
+    esac
 }
 
 env_set() {
@@ -127,18 +140,50 @@ env_set() {
     value="$3"
     touch "$file"
     tmp="${file}.tmp.$$"
-    if grep -qE "^${key}=" "$file"; then
-        awk -v key="$key" -v value="$value" '
-            BEGIN { replaced = 0 }
-            index($0, key "=") == 1 { print key "=" value; replaced = 1; next }
-            { print }
-            END { if (!replaced) print key "=" value }
-        ' "$file" > "$tmp"
-    else
-        cp "$file" "$tmp"
+    replaced="false"
+    : > "$tmp"
+
+    while IFS= read -r line || [ -n "$line" ]; do
+        case "$line" in
+            "${key}="*)
+                if [ "$replaced" != "true" ]; then
+                    printf '%s=%s\n' "$key" "$value" >> "$tmp"
+                    replaced="true"
+                fi
+                ;;
+            *)
+                printf '%s\n' "$line" >> "$tmp"
+                ;;
+        esac
+    done < "$file"
+
+    if [ "$replaced" != "true" ]; then
         printf '%s=%s\n' "$key" "$value" >> "$tmp"
     fi
     mv "$tmp" "$file"
+}
+
+dotenv_quote() {
+    printf '"'
+    printf '%s' "$1" | sed -e 's/\\/\\\\/g' -e 's/"/\\"/g'
+    printf '"'
+}
+
+env_set_quoted() {
+    file="$1"
+    key="$2"
+    value="$3"
+    env_set "$file" "$key" "$(dotenv_quote "$value")"
+}
+
+has_edge_whitespace() {
+    value="$1"
+    trimmed_value=$(printf '%s' "$value" | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//')
+    [ "$value" != "$trimmed_value" ]
+}
+
+password_byte_length() {
+    LC_ALL=C printf '%s' "$1" | wc -c | tr -d '[:space:]'
 }
 
 random_hex() {
@@ -198,18 +243,45 @@ collect_settings() {
     existing_pg_password=$(env_get "$ROOT_ENV" "POSTGRES_PASSWORD")
     existing_image_prefix=$(env_get "$ROOT_ENV" "IMAGE_PREFIX")
 
-    ADMIN_USER_VALUE=$(read_line "Admin username" "${existing_user:-quantdinger}")
-    ADMIN_EMAIL_VALUE=$(read_line "Admin email (optional)" "${existing_email:-}")
-
-    if [ -n "$existing_password" ] && [ "$existing_password" != "123456" ]; then
-        entered_password=$(read_secret_optional "Admin password (leave blank to keep existing)")
-        ADMIN_PASSWORD_VALUE="${entered_password:-$existing_password}"
+    existing_user_length=${#existing_user}
+    existing_password_length=${#existing_password}
+    existing_password_bytes=$(password_byte_length "$existing_password")
+    if [ -n "$existing_password" ] \
+        && [ "$existing_password" != "123456" ] \
+        && [ "$existing_user_length" -ge 3 ] \
+        && [ "$existing_user_length" -le 50 ] \
+        && ! has_edge_whitespace "$existing_user" \
+        && [ "$existing_password_length" -ge 6 ] \
+        && [ "$existing_password_bytes" -le 72 ]; then
+        ADMIN_USER_VALUE="$existing_user"
+        ADMIN_PASSWORD_VALUE="$existing_password"
+        ADMIN_CREDENTIALS_REUSED="true"
+        say "${YELLOW}Existing administrator credentials detected; keeping the configured username and password.${NC}"
+        say "Change administrator credentials from Profile after signing in."
     else
+        while true; do
+            ADMIN_USER_VALUE=$(read_line "Admin username" "${existing_user:-quantdinger}")
+            admin_user_length=${#ADMIN_USER_VALUE}
+            if [ "$admin_user_length" -lt 3 ] || [ "$admin_user_length" -gt 50 ]; then
+                say "${RED}Admin username must be 3-50 characters.${NC}"
+                continue
+            fi
+            if has_edge_whitespace "$ADMIN_USER_VALUE"; then
+                say "${RED}Admin username cannot start or end with whitespace.${NC}"
+                continue
+            fi
+            break
+        done
+
         while true; do
             pass1=$(read_secret "Admin password")
             pass2=$(read_secret "Confirm admin password")
-            if [ -z "$pass1" ]; then
-                say "${RED}Admin password cannot be empty.${NC}"
+            if [ "${#pass1}" -lt 6 ]; then
+                say "${RED}Admin password must be at least 6 characters.${NC}"
+                continue
+            fi
+            if [ "$(password_byte_length "$pass1")" -gt 72 ]; then
+                say "${RED}Admin password must be at most 72 UTF-8 bytes.${NC}"
                 continue
             fi
             if [ "$pass1" = "123456" ]; then
@@ -224,6 +296,7 @@ collect_settings() {
             break
         done
     fi
+    ADMIN_EMAIL_VALUE=$(read_line "Admin email (optional)" "${existing_email:-}")
 
     FRONTEND_PORT_VALUE=$(read_line "Frontend port" "${existing_frontend_port:-8888}")
     MOBILE_PORT_VALUE=$(read_line "Mobile H5 port" "${existing_mobile_port:-8889}")
@@ -257,17 +330,18 @@ collect_settings() {
 }
 
 write_settings() {
-    env_set "$BACKEND_ENV" "SECRET_KEY" "$SECRET_KEY_VALUE"
-    env_set "$BACKEND_ENV" "ADMIN_USER" "$ADMIN_USER_VALUE"
-    env_set "$BACKEND_ENV" "ADMIN_PASSWORD" "$ADMIN_PASSWORD_VALUE"
-    env_set "$BACKEND_ENV" "ADMIN_EMAIL" "$ADMIN_EMAIL_VALUE"
-    env_set "$BACKEND_ENV" "FRONTEND_URL" "http://localhost:${FRONTEND_PORT_VALUE},http://localhost:${MOBILE_PORT_VALUE}"
+    env_set_quoted "$BACKEND_ENV" "SECRET_KEY" "$SECRET_KEY_VALUE"
+    env_set_quoted "$BACKEND_ENV" "ADMIN_USER" "$ADMIN_USER_VALUE"
+    env_set_quoted "$BACKEND_ENV" "ADMIN_PASSWORD" "$ADMIN_PASSWORD_VALUE"
+    env_set_quoted "$BACKEND_ENV" "ADMIN_EMAIL" "$ADMIN_EMAIL_VALUE"
+    env_set_quoted "$BACKEND_ENV" "FRONTEND_URL" "http://localhost:${FRONTEND_PORT_VALUE},http://localhost:${MOBILE_PORT_VALUE}"
 
     env_set "$ROOT_ENV" "FRONTEND_PORT" "$FRONTEND_PORT_VALUE"
     env_set "$ROOT_ENV" "MOBILE_PORT" "$MOBILE_PORT_VALUE"
     env_set "$ROOT_ENV" "BACKEND_PORT" "$BACKEND_PORT_VALUE"
     env_set "$ROOT_ENV" "POSTGRES_PASSWORD" "$POSTGRES_PASSWORD_VALUE"
     env_set "$ROOT_ENV" "IMAGE_PREFIX" "$IMAGE_PREFIX_VALUE"
+    env_set "$ROOT_ENV" "FRONTEND_URL" "http://localhost:${FRONTEND_PORT_VALUE},http://localhost:${MOBILE_PORT_VALUE}"
 
     chmod 600 "$BACKEND_ENV" "$ROOT_ENV" 2>/dev/null || true
 }
@@ -284,7 +358,7 @@ wait_for_backend() {
     api_url="http://127.0.0.1:${BACKEND_PORT_VALUE##*:}/api/health"
     attempt=1
     while [ "$attempt" -le 45 ]; do
-        if curl -sf "$api_url" >/dev/null 2>&1; then
+        if curl -sf --max-time 2 "$api_url" >/dev/null 2>&1; then
             say "${GREEN}Backend is ready.${NC}"
             return 0
         fi
@@ -292,9 +366,51 @@ wait_for_backend() {
         sleep 2
         attempt=$((attempt + 1))
     done
-    say "${YELLOW}Backend is still starting. Check logs with:${NC}"
+    say "${RED}Backend did not become healthy within the expected startup window. Check logs with:${NC}"
     say "  cd ${INSTALL_DIR}"
     say "  ${COMPOSE_CMD} -f ${COMPOSE_FILE} logs -f backend"
+    fail "Installation did not complete successfully"
+}
+
+verify_settings_storage() {
+    say "${YELLOW}Verifying system settings storage...${NC}"
+    if $COMPOSE_CMD -f "$COMPOSE_FILE" exec -T -u 10001:10001 backend \
+        sh -c 'test -f /app/.env && test -r /app/.env && test -w /app/.env' \
+        >/dev/null 2>&1; then
+        say "${GREEN}System settings storage is writable.${NC}"
+        return 0
+    fi
+
+    say "${RED}The backend runtime user cannot write /app/.env.${NC}"
+    say "Inspect the host file and container ownership with:"
+    say "  ls -ln ${INSTALL_DIR}/${BACKEND_ENV}"
+    say "  ${COMPOSE_CMD} -f ${COMPOSE_FILE} exec -T -u 10001:10001 backend ls -ln /app/.env"
+    fail "Installation stopped because system settings cannot be saved"
+}
+
+verify_admin_credentials() {
+    say "${YELLOW}Verifying administrator credentials...${NC}"
+    if $COMPOSE_CMD -f "$COMPOSE_FILE" exec -T backend python -c '
+from app.config.settings import Config
+from app.services.user_service import get_user_service
+
+user = get_user_service().authenticate(
+    Config.ADMIN_USER,
+    Config.ADMIN_PASSWORD,
+    update_last_login=False,
+)
+raise SystemExit(0 if user and user.get("role") == "admin" else 1)
+' >/dev/null 2>&1; then
+        say "${GREEN}Administrator credentials verified.${NC}"
+        return 0
+    fi
+
+    say "${RED}The configured administrator credentials do not match the database.${NC}"
+    say "This usually means an existing PostgreSQL volume already contains a different account."
+    say "Inspect the existing account and backend startup log with:"
+    say "  docker exec quantdinger-db psql -U quantdinger -d quantdinger -c \"SELECT id, username, role, status FROM qd_users;\""
+    say "  ${COMPOSE_CMD} -f ${COMPOSE_FILE} logs backend"
+    fail "Installation stopped because the administrator login could not be verified"
 }
 
 print_summary() {
@@ -306,7 +422,11 @@ print_summary() {
     say "API:         http://127.0.0.1:${BACKEND_PORT_VALUE##*:}"
     say "Directory:   ${INSTALL_DIR}"
     say "Username:    ${ADMIN_USER_VALUE}"
-    say "Password:    the password you entered during installation"
+    if [ "$ADMIN_CREDENTIALS_REUSED" = "true" ]; then
+        say "Password:    existing administrator password"
+    else
+        say "Password:    the password you entered during installation"
+    fi
     say ""
     say "Useful commands:"
     say "  cd ${INSTALL_DIR}"
@@ -325,7 +445,11 @@ main() {
     write_settings
     start_stack
     wait_for_backend
+    verify_settings_storage
+    verify_admin_credentials
     print_summary
 }
 
-main
+if [ "${QUANTDINGER_INSTALL_LIB_ONLY:-false}" != "true" ]; then
+    main
+fi

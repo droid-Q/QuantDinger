@@ -168,6 +168,30 @@
           "tp_price": { "type": "number", "nullable": true, "description": "Optional take-profit price for live orders" },
           "sl_price": { "type": "number", "nullable": true, "description": "Optional stop-loss price for live orders" }
         }
+      },
+      "StrategySourceWriteRequest": {
+        "type": "object",
+        "required": ["name", "code"],
+        "properties": {
+          "name":         { "type": "string" },
+          "description":  { "type": "string" },
+          "code":         { "type": "string", "description": "Strategy API V2 Python source, max 512 KiB" },
+          "template_key": { "type": "string" },
+          "param_schema": { "type": "object" },
+          "metadata":     { "type": "object" }
+        }
+      },
+      "StrategySourcePatchRequest": {
+        "type": "object",
+        "minProperties": 1,
+        "properties": {
+          "name":         { "type": "string" },
+          "description":  { "type": "string" },
+          "code":         { "type": "string", "description": "Strategy API V2 Python source, max 512 KiB" },
+          "template_key": { "type": "string" },
+          "param_schema": { "type": "object" },
+          "metadata":     { "type": "object" }
+        }
       }
     }
   },
@@ -267,6 +291,91 @@
         "x-scope-class": "T",
         "parameters": [{ "in": "path", "name": "strategy_id", "required": true, "schema": { "type": "integer" } }],
         "responses": { "200": { "description": "Stopped" }, "404": { "description": "Strategy not found" } }
+      }
+    },
+    "/api/agent/v1/strategy-sources/templates": {
+      "get": {
+        "summary": "List system Strategy API V2 templates with starter source",
+        "x-scope-class": "R",
+        "parameters": [
+          { "in": "query", "name": "limit", "required": false, "schema": { "type": "integer", "default": 20, "maximum": 100 } }
+        ],
+        "responses": { "200": { "description": "OK" } }
+      }
+    },
+    "/api/agent/v1/strategy-sources/compile": {
+      "post": {
+        "summary": "Compile Strategy API V2 source and return the canonical manifest without saving",
+        "x-scope-class": "R",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "code": { "type": "string" },
+                  "source_id": { "type": "integer" }
+                }
+              }
+            }
+          }
+        },
+        "responses": { "200": { "description": "Compiled manifest" }, "400": { "description": "Invalid Strategy API V2 source" } }
+      }
+    },
+    "/api/agent/v1/strategy-sources": {
+      "get": {
+        "summary": "List tenant-owned Strategy API V2 sources without code bodies",
+        "x-scope-class": "R",
+        "parameters": [
+          { "in": "query", "name": "limit", "required": false, "schema": { "type": "integer", "default": 50, "maximum": 200 } }
+        ],
+        "responses": { "200": { "description": "OK" } }
+      },
+      "post": {
+        "summary": "Compile and save a private Strategy API V2 source",
+        "x-scope-class": "W",
+        "requestBody": { "required": true, "content": { "application/json": { "schema": { "$ref": "#/components/schemas/StrategySourceWriteRequest" } } } },
+        "responses": { "200": { "description": "Created" }, "400": { "description": "Compile or validation failure" } }
+      }
+    },
+    "/api/agent/v1/strategy-sources/{source_id}": {
+      "get": {
+        "summary": "Get a tenant-owned Strategy API V2 source including visible code",
+        "x-scope-class": "R",
+        "parameters": [{ "in": "path", "name": "source_id", "required": true, "schema": { "type": "integer" } }],
+        "responses": { "200": { "description": "OK" }, "404": { "description": "Not found" } }
+      },
+      "patch": {
+        "summary": "Compile and update a tenant-owned Strategy API V2 source",
+        "x-scope-class": "W",
+        "parameters": [{ "in": "path", "name": "source_id", "required": true, "schema": { "type": "integer" } }],
+        "requestBody": { "required": true, "content": { "application/json": { "schema": { "$ref": "#/components/schemas/StrategySourcePatchRequest" } } } },
+        "responses": { "200": { "description": "Updated" }, "403": { "description": "Hidden marketplace source" }, "404": { "description": "Not found" } }
+      }
+    },
+    "/api/agent/v1/strategy-sources/{source_id}/versions": {
+      "get": {
+        "summary": "List immutable version snapshots for a Strategy API V2 source",
+        "x-scope-class": "R",
+        "parameters": [{ "in": "path", "name": "source_id", "required": true, "schema": { "type": "integer" } }],
+        "responses": { "200": { "description": "OK" }, "404": { "description": "Not found" } }
+      }
+    },
+    "/api/agent/v1/strategy-sources/{source_id}/versions/{version_id}/restore": {
+      "post": {
+        "summary": "Restore a prior source version and create a new snapshot",
+        "x-scope-class": "W",
+        "parameters": [
+          { "in": "path", "name": "source_id", "required": true, "schema": { "type": "integer" } },
+          { "in": "path", "name": "version_id", "required": true, "schema": { "type": "integer" } }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": { "application/json": { "schema": { "type": "object", "required": ["confirm"], "properties": { "confirm": { "type": "boolean", "enum": [true] } } } } }
+        },
+        "responses": { "200": { "description": "Restored" }, "400": { "description": "Explicit confirmation missing" }, "404": { "description": "Not found" } }
       }
     },
     "/api/agent/v1/runtime/overview": {

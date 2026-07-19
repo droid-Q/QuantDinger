@@ -546,6 +546,71 @@ class GridEngine:
         if remaining_slots <= 0:
             return 0
         direction = self.cfg.grid_direction
+        if direction == "neutral":
+            open_by_purpose = {"long_entry": 0, "short_entry": 0}
+            for order in self._orders.list_open(self.strategy_id):
+                purpose = str(order.purpose or "")
+                if purpose in open_by_purpose:
+                    open_by_purpose[purpose] += 1
+
+            long_cells = sorted(
+                (cell for cell in cells if cell.lower_price < current_price),
+                key=lambda cell: cell.lower_price,
+                reverse=True,
+            )
+            short_cells = sorted(
+                (cell for cell in cells if cell.upper_price > current_price),
+                key=lambda cell: cell.upper_price,
+            )
+            candidates = {
+                "long_entry": long_cells,
+                "short_entry": short_cells,
+            }
+            next_index = {"long_entry": 0, "short_entry": 0}
+
+            while placed < remaining_slots:
+                purposes = sorted(
+                    ("long_entry", "short_entry"),
+                    key=lambda purpose: (
+                        open_by_purpose[purpose],
+                        0 if purpose == "long_entry" else 1,
+                    ),
+                )
+                placed_one = False
+                for purpose in purposes:
+                    side = "buy" if purpose == "long_entry" else "sell"
+                    pos_side = "long" if purpose == "long_entry" else "short"
+                    target_price = "lower_price" if purpose == "long_entry" else "upper_price"
+                    pool = candidates[purpose]
+                    while next_index[purpose] < len(pool):
+                        cell = pool[next_index[purpose]]
+                        next_index[purpose] += 1
+                        if not self._cell_allows_entry(cell.index, purpose, cell_states):
+                            continue
+                        if self._place_limit(
+                            cell,
+                            purpose,
+                            side,
+                            getattr(cell, target_price),
+                            reduce_only=False,
+                            pos_side=pos_side,
+                        ):
+                            placed += 1
+                            open_by_purpose[purpose] += 1
+                            cell_states[int(cell.index)] = (
+                                GridCellState.BUY_OPEN
+                                if purpose == "long_entry"
+                                else GridCellState.SELL_OPEN
+                            )
+                            self._last_entry_order_ts = now
+                            placed_one = True
+                        break
+                    if placed_one or placed >= remaining_slots:
+                        break
+                if not placed_one:
+                    break
+            return placed
+
         for cell in cells:
             if placed >= remaining_slots:
                 break

@@ -10,6 +10,22 @@ def test_live_history_lookback_is_frequency_aware():
     assert live_history_days("1d", 50) == 150
 
 
+def test_intent_signal_timestamp_prefers_scheduled_wall_clock():
+    intent = OrderIntent(
+        symbol="Crypto:BTC/USDT@okx:swap",
+        kind="target_percent",
+        value=0.5,
+        signal_time=pd.Timestamp("2026-07-19 09:35:00+08:00"),
+    )
+
+    result = TradingExecutor._intent_signal_timestamp(
+        intent,
+        pd.Timestamp("2026-07-18 00:00:00Z"),
+    )
+
+    assert result == int(pd.Timestamp("2026-07-19 01:35:00Z").timestamp())
+
+
 def _frame(price: float = 100.0) -> pd.DataFrame:
     index = pd.DatetimeIndex([pd.Timestamp("2026-07-13T00:00:00Z")])
     return pd.DataFrame(
@@ -124,6 +140,42 @@ def test_target_zero_closes_existing_long_position():
     assert result is True
     assert captured["signal_type"] == "close_long"
     assert captured["script_base_qty"] == 3.0
+
+
+def test_hedged_target_updates_only_the_requested_leg():
+    executor = TradingExecutor.__new__(TradingExecutor)
+    executor._get_current_positions = lambda *_args: [
+        {"side": "long", "size": 2.0},
+        {"side": "short", "size": 5.0},
+    ]
+    calls = []
+    executor._execute_signal = lambda **kwargs: calls.append(kwargs) or True
+    intent = OrderIntent(
+        symbol=_member()["key"],
+        kind="target_quantity",
+        value=-3.0,
+        position_side="short",
+    )
+
+    result = executor._execute_strategy_v2_intent(
+        strategy_id=8,
+        strategy_name="V2 Neutral Grid",
+        intent=intent,
+        frames={_member()["key"]: _frame()},
+        candidates=[_member()],
+        initial_capital=10_000.0,
+        leverage=1.0,
+        execution_mode="signal",
+        notification_config={},
+        trading_config={},
+        exchange_config={},
+        signal_ts=2,
+    )
+
+    assert result is True
+    assert len(calls) == 1
+    assert calls[0]["signal_type"] == "reduce_short"
+    assert calls[0]["script_base_qty"] == 2.0
 
 
 def test_target_rebalance_skips_sub_dollar_dust_order():

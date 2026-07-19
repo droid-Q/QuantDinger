@@ -105,6 +105,7 @@ def create_executor_strategy():
                 "leverageEnabled": strategy_payload["leverage_enabled"],
                 "leverage": strategy_payload["leverage"],
                 "positionSide": strategy_payload["trade_direction"],
+                "strategyRuntimeConfig": strategy_payload["trading_config"],
                 "notificationChannels": notification_config.get("channels") or [],
                 "notificationTargets": notification_config.get("targets") or {},
             },

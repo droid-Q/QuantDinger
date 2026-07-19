@@ -139,6 +139,14 @@ GET    /api/agent/v1/strategies                     class R
 POST   /api/agent/v1/strategies                     class W
 PATCH  /api/agent/v1/strategies/{id}                class W
 
+GET    /api/agent/v1/strategy-sources/templates     class R
+POST   /api/agent/v1/strategy-sources/compile       class R
+GET    /api/agent/v1/strategy-sources               class R
+POST   /api/agent/v1/strategy-sources               class W
+GET    /api/agent/v1/strategy-sources/{id}          class R
+PATCH  /api/agent/v1/strategy-sources/{id}          class W
+GET    /api/agent/v1/strategy-sources/{id}/versions class R
+
 POST   /api/agent/v1/backtest/run                   class B  (async, returns job_id)
 GET    /api/agent/v1/jobs/{job_id}                 class R
 GET    /api/agent/v1/jobs/{job_id}/stream          class R

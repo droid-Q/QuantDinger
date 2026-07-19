@@ -49,7 +49,7 @@ class StrategyV2DeploymentService:
             or payload.get("position_side")
             or ""
         ).strip().lower()
-        if position_side not in {"", "long", "short"}:
+        if position_side not in {"", "long", "short", "neutral"}:
             raise StrategyV2ContractError("strategyV2.positionSideInvalid")
         account_risk = payload.get("accountRisk") or payload.get("account_risk") or {}
         if not isinstance(account_risk, dict):
@@ -59,7 +59,28 @@ class StrategyV2DeploymentService:
             "channels": list(payload.get("notificationChannels") or []),
             "targets": payload.get("notificationTargets") or {},
         }
+        generated_runtime = payload.get("strategyRuntimeConfig") or payload.get("strategy_runtime_config") or {}
+        if not isinstance(generated_runtime, dict):
+            raise StrategyV2ContractError("strategyV2.runtimeConfigInvalid")
+        allowed_runtime_keys = {
+            "strategy_family",
+            "executor_type",
+            "executor_config",
+            "executor_preview",
+            "bot_type",
+            "bot_params",
+            "symbol",
+            "market_type",
+            "margin_mode",
+            "stop_loss_pct",
+            "take_profit_pct",
+        }
         runtime_config = {
+            key: value
+            for key, value in generated_runtime.items()
+            if key in allowed_runtime_keys
+        }
+        runtime_config.update({
             "api_version": 2,
             "script_source_id": source_id,
             "strategy_manifest": manifest.metadata(),
@@ -71,7 +92,7 @@ class StrategyV2DeploymentService:
             "exchange_id": exchange_id,
             "position_side": position_side,
             "account_risk": dict(account_risk),
-        }
+        })
         market_category = manifest.markets[0] if len(manifest.markets) == 1 else "Mixed"
         symbol = self._manifest_symbol(manifest.metadata())
         exchange_config = {"credential_id": credential_id, "exchange_id": exchange_id} if credential_id else {}

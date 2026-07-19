@@ -241,6 +241,13 @@ Do not delete the volume. Either:
 2. 使用 `pg_dump` / `pg_restore` 导出并恢复数据。
 3. 使用正式的 PostgreSQL 大版本迁移流程，例如 `pg_upgrade`。
 
+## Administrator Credentials and Settings Save / 管理员凭据与设置保存
+
+Choose a language / 请选择语言：
+
+- [English](ADMIN_AND_SETTINGS_TROUBLESHOOTING_EN.md)
+- [中文](ADMIN_AND_SETTINGS_TROUBLESHOOTING_CN.md)
+
 ## Useful Recovery Commands / 常用恢复命令
 
 Check service status:

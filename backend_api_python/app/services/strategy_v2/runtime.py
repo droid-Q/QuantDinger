@@ -7,6 +7,7 @@ import math
 import calendar
 from dataclasses import dataclass, field, replace
 from typing import Any, Iterable, Mapping
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 import pandas as pd
 
@@ -30,6 +31,7 @@ class Position:
     amount: float = 0.0
     avg_cost: float = 0.0
     last_price: float = 0.0
+    position_side: str = ""
 
     @property
     def market_value(self) -> float:
@@ -41,6 +43,17 @@ class PortfolioState:
     available_cash: float
     positions: dict[str, Position] = field(default_factory=dict)
     total_value: float = 0.0
+
+
+def _normalize_position_side(value: object) -> str:
+    side = str(value or "").strip().lower()
+    return side if side in {"long", "short"} else ""
+
+
+def _position_key(symbol: object, position_side: object = "") -> str:
+    base = str(symbol or "")
+    side = _normalize_position_side(position_side)
+    return f"{base}::{side}" if side else base
 
 @dataclass(frozen=True)
 class OrderIntent:
@@ -57,6 +70,7 @@ class OrderIntent:
     execution_algo: str = "market"
     maker_wait_sec: float = 0.0
     maker_offset_bps: float = 0.0
+    position_side: str = ""
 
 
 class StrategyDataView:
@@ -136,7 +150,12 @@ class StrategyRuntimeContext:
     def order_target_percent(self, symbol: object, percent: object, **kwargs: Any) -> None:
         self._queue(symbol, "target_percent", percent, kwargs)
 
-    def get_position(self, symbols: object = None) -> dict[str, Position] | Position:
+    def get_position(
+        self,
+        symbols: object = None,
+        *,
+        position_side: str = "",
+    ) -> dict[str, Position] | Position:
         if symbols is None:
             return dict(self.portfolio.positions)
         if isinstance(symbols, str):
@@ -144,19 +163,25 @@ class StrategyRuntimeContext:
                 key = self.portal.resolve_key(symbols)
             except Exception:
                 key = str(symbols)
-            current = self.portfolio.positions.get(key)
+            leg_key = _position_key(key, position_side)
+            current = self.portfolio.positions.get(leg_key)
             if current is not None:
                 return current
             try:
                 last_price = self.portal.current(key, "close", 0.0)
             except Exception:
                 last_price = 0.0
-            return Position(key, last_price=last_price)
+            return Position(
+                key,
+                last_price=last_price,
+                position_side=_normalize_position_side(position_side),
+            )
         output: dict[str, Position] = {}
         for symbol in symbols:
             key = self.portal.resolve_key(symbol)
-            if key in self.portfolio.positions:
-                output[key] = self.portfolio.positions[key]
+            leg_key = _position_key(key, position_side)
+            if leg_key in self.portfolio.positions:
+                output[leg_key] = self.portfolio.positions[leg_key]
         return output
 
     def get_positions(self, symbols: object = None) -> dict[str, Position]:
@@ -368,6 +393,7 @@ class StrategyRuntimeContext:
             execution_algo=execution_algo,
             maker_wait_sec=maker_wait_sec,
             maker_offset_bps=maker_offset_bps,
+            position_side=_normalize_position_side(kwargs.get("position_side")),
         ))
 
     def _default_symbol(self) -> str:
@@ -478,10 +504,14 @@ class MultiAssetSimulationBroker:
                 if status == "deferred":
                     deferred.append(replace(order, attempts=order.attempts + 1))
                 continue
-            current = self.portfolio.positions.get(order.symbol) or Position(order.symbol)
+            position_key = _position_key(order.symbol, order.position_side)
+            current = self.portfolio.positions.get(position_key) or Position(
+                order.symbol,
+                position_side=_normalize_position_side(order.position_side),
+            )
             equity = self.mark_to_market(portal, timestamp)
             target_qty = self._target_quantity(order, current, open_price, equity)
-            target_weights[order.symbol] = target_qty * open_price / equity if equity else 0.0
+            target_weights[position_key] = target_qty * open_price / equity if equity else 0.0
             delta = target_qty - current.amount
             direction = 1 if delta > 0 else -1 if delta < 0 else 0
             if order.pending_direction and direction != order.pending_direction:
@@ -523,6 +553,7 @@ class MultiAssetSimulationBroker:
                 fill_price=fill_price,
                 equity=equity,
                 lot_size=lot_size,
+                position_key=position_key,
             )
             if abs(feasible_delta) < lot_size - 1e-12:
                 self.order_ledger.append(self._order_event(
@@ -553,17 +584,17 @@ class MultiAssetSimulationBroker:
             current.last_price = fill_price
             self.portfolio.available_cash = projected_cash
             if abs(current.amount) <= 1e-12:
-                self.portfolio.positions.pop(order.symbol, None)
-                self._protections.pop(order.symbol, None)
+                self.portfolio.positions.pop(position_key, None)
+                self._protections.pop(position_key, None)
             else:
-                self.portfolio.positions[order.symbol] = current
+                self.portfolio.positions[position_key] = current
                 new_side = "long" if current.amount > 0 else "short"
-                existing = self._protections.get(order.symbol)
+                existing = self._protections.get(position_key)
                 side_changed = existing is not None and existing.side != new_side
                 if order.protection is not None or side_changed:
                     spec = order.protection or (existing.spec if existing else None)
                     if spec is not None:
-                        self._protections[order.symbol] = ProtectionState.open(
+                        self._protections[position_key] = ProtectionState.open(
                             symbol=order.symbol,
                             side=new_side,
                             entry_price=current.avg_cost,
@@ -573,7 +604,8 @@ class MultiAssetSimulationBroker:
             self.portfolio.total_value = self.portfolio.available_cash + sum(
                 position.market_value for position in self.portfolio.positions.values()
             )
-            execution_type, position_side = _execution_identity(old_amount, target_qty, delta)
+            execution_type, inferred_position_side = _execution_identity(old_amount, target_qty, delta)
+            position_side = _normalize_position_side(order.position_side) or inferred_position_side
             execution = {
                 "order_id": order_id,
                 "symbol": order.symbol,
@@ -581,6 +613,7 @@ class MultiAssetSimulationBroker:
                 "side": "buy" if delta > 0 else "sell",
                 "type": execution_type,
                 "position_side": position_side,
+                "position_key": position_key,
                 "quantity": abs(delta),
                 "price": fill_price,
                 "notional": notional,
@@ -657,7 +690,11 @@ class MultiAssetSimulationBroker:
             return "no_price"
         if _truthy(bar.get("suspended")) or _truthy(bar.get("is_suspended")):
             return "suspended"
-        current = self.portfolio.positions.get(order.symbol) or Position(order.symbol)
+        position_key = _position_key(order.symbol, order.position_side)
+        current = self.portfolio.positions.get(position_key) or Position(
+            order.symbol,
+            position_side=_normalize_position_side(order.position_side),
+        )
         target = self._target_quantity(order, current, open_price, max(self.portfolio.total_value, 0.0))
         delta = target - current.amount
         if delta > 0 and (_truthy(bar.get("limit_up")) or _truthy(bar.get("is_limit_up"))):
@@ -674,6 +711,7 @@ class MultiAssetSimulationBroker:
         fill_price: float,
         equity: float,
         lot_size: float,
+        position_key: str,
     ) -> tuple[float, str]:
         feasible = delta
         reason = ""
@@ -684,7 +722,7 @@ class MultiAssetSimulationBroker:
             if feasible > cash_cap:
                 feasible = cash_cap
                 reason = "insufficient_cash"
-        gross_limit = max(0.0, equity * self.leverage - self._gross_value(exclude=current.symbol))
+        gross_limit = max(0.0, equity * self.leverage - self._gross_value(exclude=position_key))
         max_target_abs = gross_limit / max(fill_price, 1e-12)
         desired_target = current.amount + feasible
         if abs(desired_target) > max_target_abs + 1e-12:
@@ -732,6 +770,7 @@ class MultiAssetSimulationBroker:
         return {
             "orderId": order_id,
             "symbol": order.symbol,
+            "positionSide": _normalize_position_side(order.position_side),
             "kind": order.kind,
             "value": order.value,
             "reason": order.reason,
@@ -783,12 +822,13 @@ class MultiAssetSimulationBroker:
         timestamp: Any,
     ) -> list[ProtectionDecision]:
         decisions: list[ProtectionDecision] = []
-        for symbol, state in list(self._protections.items()):
-            position = self.portfolio.positions.get(symbol)
+        for position_key, state in list(self._protections.items()):
+            position = self.portfolio.positions.get(position_key)
+            symbol = position.symbol if position is not None else str(state.symbol or "")
             bar = portal.bar_at(symbol, timestamp)
             if position is None or bar is None:
                 if position is None:
-                    self._protections.pop(symbol, None)
+                    self._protections.pop(position_key, None)
                 continue
             state.entry_price = float(position.avg_cost)
             decision = self.protection_engine.evaluate_bar(
@@ -808,6 +848,7 @@ class MultiAssetSimulationBroker:
                     0.0,
                     decision.reason,
                     signal_time=pd.Timestamp(timestamp),
+                    position_side=position.position_side,
                 )],
                 portal,
                 timestamp,
@@ -816,7 +857,7 @@ class MultiAssetSimulationBroker:
             if len(self.executions) == execution_count:
                 latest = self.order_ledger[-1] if self.order_ledger else {}
                 if latest.get("statusReason") == "target_already_met":
-                    self._protections.pop(symbol, None)
+                    self._protections.pop(position_key, None)
                 continue
             decisions.append(decision)
             self.protection_events.append({
@@ -831,7 +872,8 @@ class MultiAssetSimulationBroker:
 
     def mark_to_market(self, portal: MultiAssetDataPortal, timestamp: Any) -> float:
         total = float(self.portfolio.available_cash)
-        for symbol, position in self.portfolio.positions.items():
+        for _, position in self.portfolio.positions.items():
+            symbol = position.symbol
             price = portal.close_at(symbol, timestamp)
             if price is None:
                 price = portal.current(symbol, "close", position.last_price)
@@ -894,7 +936,7 @@ class MultiAssetSimulationBroker:
         old_cost: float,
         target_amount: float,
     ) -> None:
-        symbol = str(execution["symbol"])
+        symbol = str(execution.get("position_key") or execution["symbol"])
         delta = float(execution["quantity"]) * (1.0 if execution["side"] == "buy" else -1.0)
         closing_quantity = min(abs(old_amount), abs(delta)) if old_amount * delta < 0 else 0.0
         opening_quantity = max(0.0, abs(delta) - closing_quantity)
@@ -1128,13 +1170,29 @@ class StrategyV2BacktestRunner:
         initial = float(self.broker.portfolio.starting_cash)
         final = float(self.broker.portfolio.total_value)
         total_return = (final / initial - 1.0) * 100.0 if initial else 0.0
-        values = [float(item["value"]) for item in self.broker.equity_curve]
-        peak = values[0] if values else initial
+        equity_curve: list[dict[str, Any]] = []
+        peak = initial
+        peak_time = str(self.broker.equity_curve[0].get("time") or "") if self.broker.equity_curve else ""
         max_drawdown = 0.0
-        for value in values:
-            peak = max(peak, value)
-            if peak > 0:
-                max_drawdown = min(max_drawdown, (value / peak - 1.0) * 100.0)
+        max_drawdown_peak = initial
+        max_drawdown_trough = initial
+        max_drawdown_peak_time = ""
+        max_drawdown_trough_time = ""
+        for item in self.broker.equity_curve:
+            value = float(item["value"])
+            item_time = str(item.get("time") or "")
+            if peak <= 0 or value > peak:
+                peak = value
+                peak_time = item_time
+            drawdown = (value / peak - 1.0) * 100.0 if peak > 0 else 0.0
+            equity_curve.append({**item, "drawdown": drawdown})
+            if drawdown < max_drawdown:
+                max_drawdown = drawdown
+                max_drawdown_peak = peak
+                max_drawdown_trough = value
+                max_drawdown_peak_time = peak_time
+                max_drawdown_trough_time = item_time
+        values = [float(item["value"]) for item in equity_curve]
         closed_trades = list(self.broker.closed_trades)
         executions = list(self.broker.executions)
         profits = [float(item.get("profit") or 0.0) for item in closed_trades]
@@ -1166,14 +1224,19 @@ class StrategyV2BacktestRunner:
         average_profit = sum(profits) / len(profits) if profits else 0.0
         attribution = self._attribution(initial)
         return {
+            "initialCapital": initial,
             "totalReturn": total_return,
             "total_return": total_return,
             "finalEquity": final,
             "maxDrawdown": max_drawdown,
+            "maxDrawdownPeakEquity": max_drawdown_peak,
+            "maxDrawdownTroughEquity": max_drawdown_trough,
+            "maxDrawdownPeakTime": max_drawdown_peak_time,
+            "maxDrawdownTroughTime": max_drawdown_trough_time,
             "totalTrades": len(closed_trades),
             "totalExecutions": len(executions),
-            "sampleCount": len(self.broker.equity_curve),
-            "equityCurve": list(self.broker.equity_curve),
+            "sampleCount": len(equity_curve),
+            "equityCurve": equity_curve,
             "holdingSnapshots": list(self.broker.holding_snapshots),
             "rebalanceRecords": list(self.broker.rebalance_records),
             "orderLedger": list(self.broker.order_ledger),
@@ -1221,7 +1284,7 @@ class StrategyV2BacktestRunner:
         commission_by_symbol: dict[str, float] = {}
         realized_by_symbol: dict[str, float] = {}
         for execution in self.broker.executions:
-            symbol = str(execution.get("symbol") or "")
+            symbol = str(execution.get("position_key") or execution.get("symbol") or "")
             commission_by_symbol[symbol] = commission_by_symbol.get(symbol, 0.0) + float(execution.get("commission") or 0.0)
         for trade in self.broker.closed_trades:
             symbol = str(trade.get("symbol") or "")
@@ -1272,7 +1335,7 @@ class StrategyV2BacktestRunner:
                 fee_mismatches.append(index)
             signed_quantity = quantity if side == "buy" else -quantity
             cash -= signed_quantity * float(execution.get("price") or 0.0) + fee
-            symbol = str(execution.get("symbol") or "")
+            symbol = str(execution.get("position_key") or execution.get("symbol") or "")
             quantities[symbol] = quantities.get(symbol, 0.0) + signed_quantity
 
             reference_price = float(execution.get("reference_price") or 0.0)
@@ -1328,6 +1391,7 @@ class StrategyV2LiveSession:
         initial_capital: float,
         params: Mapping[str, Any] | None = None,
         universe_resolver=None,
+        schedule_timezone: str = "UTC",
     ) -> None:
         self.program = compile_strategy_v2(code)
         self._universe_resolver = universe_resolver
@@ -1335,45 +1399,71 @@ class StrategyV2LiveSession:
         self.portfolio = PortfolioState(initial_capital, initial_capital, total_value=initial_capital)
         self.context = StrategyRuntimeContext(portal=self.portal, portfolio=self.portfolio, params=params)
         self.last_processed: pd.Timestamp | None = None
+        self.schedule_timezone = _resolve_schedule_timezone(schedule_timezone)
+        self.last_schedule_check: pd.Timestamp | None = None
         self.protection_engine = ProtectionEngine()
         self.protection_specs: dict[str, ProtectionSpec] = {}
         self.protection_states: dict[str, ProtectionState] = {}
         self._protection_exit_pending: set[str] = set()
         self._bind_runtime_api()
 
-    def process(self, frames: Mapping[str, pd.DataFrame]) -> tuple[list[OrderIntent], list[str], pd.Timestamp]:
+    def process(
+        self,
+        frames: Mapping[str, pd.DataFrame],
+        *,
+        schedule_time: Any = None,
+    ) -> tuple[list[OrderIntent], list[str], pd.Timestamp]:
         portal = MultiAssetDataPortal(frames, universe_resolver=self._universe_resolver)
         if portal.timestamps.empty:
             raise StrategyV2ContractError("strategyV2.noMarketData")
         timestamp = pd.Timestamp(portal.timestamps[-1])
-        if self.last_processed is not None and timestamp <= self.last_processed:
-            return [], [], timestamp
+        schedule_clock = self._schedule_clock(schedule_time)
+        bar_advanced = self.last_processed is None or timestamp > self.last_processed
 
         self.portal = portal
         self.context.portal = portal
         self.context.data = StrategyDataView(portal)
-        self.context.current_dt = timestamp
         self.context.previous_trading_date = self.last_processed
         portal.set_clock(timestamp, include_current=True)
 
-        if self.last_processed is None or timestamp.date() != self.last_processed.date():
+        if bar_advanced and (
+            self.last_processed is None or timestamp.date() != self.last_processed.date()
+        ):
+            self.context.current_dt = timestamp
             self._invoke("before_trading_start", self.context, self.context.data)
-        for schedule in self.program.manifest.schedules:
-            if StrategyV2BacktestRunner._schedule_due(
-                schedule,
-                timestamp,
-                self.last_processed,
-                self.program.manifest.primary_frequency,
-            ):
-                self._invoke(schedule.callback, self.context, self.context.data)
-        if self.program.manifest.strategy_type == "portfolio" and not self.program.manifest.schedules:
-            self._invoke("on_rebalance", self.context, portal.panel())
-        self._invoke("handle_data", self.context, self.context.data)
+
+        previous_schedule_check = self.last_schedule_check
+        if previous_schedule_check is not None and schedule_clock > previous_schedule_check:
+            self.context.current_dt = schedule_clock
+            for schedule in self.program.manifest.schedules:
+                if StrategyV2BacktestRunner._schedule_due(
+                    schedule,
+                    schedule_clock,
+                    previous_schedule_check,
+                    "1m",
+                ):
+                    self._invoke(schedule.callback, self.context, self.context.data)
+        self.last_schedule_check = schedule_clock
+
+        if bar_advanced:
+            self.context.current_dt = timestamp
+            if self.program.manifest.strategy_type == "portfolio" and not self.program.manifest.schedules:
+                self._invoke("on_rebalance", self.context, portal.panel())
+            self._invoke("handle_data", self.context, self.context.data)
         orders = self.context.flush_orders()
         self._capture_protection_intents(orders)
         logs = self.context.flush_logs()
-        self.last_processed = timestamp
+        if bar_advanced:
+            self.last_processed = timestamp
         return orders, logs, timestamp
+
+    def _schedule_clock(self, value: Any = None) -> pd.Timestamp:
+        if value is None:
+            return pd.Timestamp.now(tz=self.schedule_timezone)
+        current = pd.Timestamp(value)
+        if current.tzinfo is None:
+            return current.tz_localize(self.schedule_timezone)
+        return current.tz_convert(self.schedule_timezone)
 
     def synchronize_positions(
         self,
@@ -1540,6 +1630,14 @@ def _is_intraday_frequency(frequency: str) -> bool:
     return normalized.endswith("m") or normalized.endswith("h")
 
 
+def _resolve_schedule_timezone(value: str) -> ZoneInfo:
+    name = str(value or "UTC").strip() or "UTC"
+    try:
+        return ZoneInfo(name)
+    except (ZoneInfoNotFoundError, ValueError):
+        return ZoneInfo("UTC")
+
+
 def _parse_schedule_time(value: str) -> pd.Timedelta:
     try:
         hours, minutes = str(value or "00:00").split(":", 1)
@@ -1552,7 +1650,15 @@ def _merge_pending(current: Iterable[OrderIntent], incoming: Iterable[OrderInten
     output = list(current)
     for order in incoming:
         if order.kind.startswith("target_"):
-            output = [item for item in output if not (item.symbol == order.symbol and item.kind.startswith("target_"))]
+            output = [
+                item for item in output
+                if not (
+                    item.symbol == order.symbol
+                    and _normalize_position_side(item.position_side)
+                    == _normalize_position_side(order.position_side)
+                    and item.kind.startswith("target_")
+                )
+            ]
         output.append(order)
     return output
 

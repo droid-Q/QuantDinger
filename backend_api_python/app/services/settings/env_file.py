@@ -3,7 +3,10 @@
 from __future__ import annotations
 
 import os
+import re
 from typing import Dict
+
+from dotenv import dotenv_values
 
 from app.utils.logger import get_logger
 
@@ -15,32 +18,19 @@ ENV_FILE_PATH = os.path.join(BACKEND_DIR, ".env")
 
 def read_env_file(path: str = ENV_FILE_PATH) -> Dict[str, str]:
     """Read key/value pairs from an .env file."""
-    env_values: Dict[str, str] = {}
-
     if not os.path.exists(path):
         logger.warning(".env file not found at %s", path)
-        return env_values
+        return {}
 
     try:
-        with open(path, "r", encoding="utf-8") as handle:
-            for line in handle:
-                stripped = line.strip()
-                if not stripped or stripped.startswith("#"):
-                    continue
-                if "=" not in stripped:
-                    continue
-                key, value = stripped.split("=", 1)
-                key = key.strip()
-                value = value.strip()
-                if (value.startswith('"') and value.endswith('"')) or (
-                    value.startswith("'") and value.endswith("'")
-                ):
-                    value = value[1:-1]
-                env_values[key] = value
+        parsed = dotenv_values(path)
+        return {
+            str(key): "" if value is None else str(value)
+            for key, value in parsed.items()
+        }
     except Exception as exc:
         logger.error("Failed to read .env file: %s", exc)
-
-    return env_values
+        return {}
 
 
 def write_env_file(env_values: Dict[str, str], path: str = ENV_FILE_PATH) -> bool:
@@ -90,6 +80,12 @@ def write_env_file(env_values: Dict[str, str], path: str = ENV_FILE_PATH) -> boo
 
 def _format_env_line(key: str, value) -> str:
     text = str(value)
-    if " " in text or '"' in text or "'" in text:
-        return f'{key}="{text}"\n'
+    if re.search(r"[\s#'\"\\]", text):
+        escaped = (
+            text.replace("\\", "\\\\")
+            .replace('"', '\\"')
+            .replace("\r", "\\r")
+            .replace("\n", "\\n")
+        )
+        return f'{key}="{escaped}"\n'
     return f"{key}={text}\n"

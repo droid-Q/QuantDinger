@@ -5,8 +5,10 @@ QuantDinger's MCP server wraps the Agent Gateway and keeps the REST API as the s
 ## Install
 
 ```bash
-pip install -e ./mcp_server
+pip install "quantdinger-mcp==0.4.0"
 ```
+
+For repository development, use `pip install -e ./mcp_server` instead.
 
 Set these environment variables in the MCP client process:
 
@@ -16,6 +18,8 @@ QUANTDINGER_AGENT_TOKEN=qd_agent_xxx
 ```
 
 Run `quantdinger-mcp` for the default `stdio` transport. For network use, set `QUANTDINGER_MCP_TRANSPORT=sse` or `streamable-http`, plus optional `QUANTDINGER_MCP_HOST` and `QUANTDINGER_MCP_PORT`.
+
+Non-loopback network listeners are denied by default unless `QUANTDINGER_MCP_AUTH_TOKEN` is set to a distinct secret of at least 32 characters. Configure `QUANTDINGER_MCP_PUBLIC_URL` to the externally reachable HTTPS base URL and send the inbound token as a Bearer token from the MCP client. The inbound token protects the MCP listener; `QUANTDINGER_AGENT_TOKEN` remains the separate upstream tenant credential.
 
 ## Client configuration
 
@@ -41,10 +45,11 @@ Keep the configuration private. Prefer an environment-secret facility when the c
 
 - Use market tools for discovery and OHLCV reads.
 - Use indicator tools only for chart artifacts.
-- Use Strategy API V2 code for backtests.
-- Create deployments from saved V2 source IDs.
+- Compile Strategy API V2 code before saving it.
+- Save private Strategy API V2 sources and inspect version history.
+- Create stopped deployments from saved V2 source IDs.
 - Use bounded job polling or SSE streaming for backtest results.
-- Require explicit confirmation before stopping runtime state or placing any order.
+- Require explicit confirmation before restoring source versions, cancelling paper orders, stopping runtime state, or placing any order.
 
 The strategy manifest owns market, instrument, frequency, warmup, dependency, and leverage scope. Do not pass those as alternate backtest fields.
 

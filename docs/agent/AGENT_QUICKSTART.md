@@ -19,6 +19,17 @@ Scopes are `R` for reads, `W` for saved artifacts and deployment configuration, 
 
 Executable strategies use Strategy API V2. Code defines `initialize(context)`, declares its universe and subscriptions, and provides `handle_data`, `on_rebalance`, or a scheduled callback. Markets, instruments, frequencies, dependencies, warmup, and leverage policy come from the compiled manifest.
 
+The Agent Gateway exposes the complete source lifecycle:
+
+1. List starter code with `GET /strategy-sources/templates`.
+2. Compile code with `POST /strategy-sources/compile`.
+3. Save a private source with `POST /strategy-sources`.
+4. Inspect or update it through `/strategy-sources/{source_id}`.
+5. Review immutable snapshots through `/strategy-sources/{source_id}/versions`.
+6. Create a stopped deployment from the saved source id.
+
+Source restoration requires an explicit `confirm=true` request and creates another immutable snapshot.
+
 Create a stopped deployment from a saved source:
 
 ```bash

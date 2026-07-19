@@ -7,6 +7,147 @@ import re
 from typing import Any
 
 
+def _build_neutral_grid_v2_source(
+    config: dict[str, Any],
+    preview: dict[str, Any],
+    *,
+    instrument: str,
+    timeframe: str,
+) -> str:
+    levels = list(preview.get("levels") or [])
+    dynamic_anchor = bool(config.get("dynamic_anchor"))
+    reference_price = (
+        float(config.get("start_price") or 0.0)
+        + float(config.get("end_price") or 0.0)
+    ) / 2.0
+
+    def leg_values(side: str) -> tuple[list[float], list[float]]:
+        rows = [item for item in levels if str((item or {}).get("side") or "") == side]
+        rows.sort(key=lambda item: float((item or {}).get("price") or 0.0), reverse=side == "long")
+        prices = [float((item or {}).get("price") or 0.0) for item in rows]
+        if dynamic_anchor and reference_price > 0:
+            prices = [price / reference_price for price in prices]
+        amounts = [max(0.0, float((item or {}).get("amount_quote") or 0.0)) for item in rows]
+        return prices, amounts
+
+    long_prices, long_amounts = leg_values("long")
+    short_prices, short_amounts = leg_values("short")
+    total_amount = sum(long_amounts) + sum(short_amounts)
+    divisor = total_amount if total_amount > 0 else 1.0
+    long_weights = [amount / divisor for amount in long_amounts]
+    short_weights = [amount / divisor for amount in short_amounts]
+    take_profit = float(config.get("take_profit_pct") or 0.0)
+    hard_stop = float(config.get("hard_stop_pct") or 0.0)
+    constants = (
+        f"INSTRUMENT = {instrument!r}\n"
+        f"TIMEFRAME = {timeframe!r}\n"
+        f"DYNAMIC_ANCHOR = {dynamic_anchor!r}\n"
+        f"LONG_PRICE_LEVELS = {long_prices!r}\n"
+        f"SHORT_PRICE_LEVELS = {short_prices!r}\n"
+        f"LONG_AMOUNT_WEIGHTS = {long_weights!r}\n"
+        f"SHORT_AMOUNT_WEIGHTS = {short_weights!r}\n"
+        f"TAKE_PROFIT = {take_profit!r}\n"
+        f"HARD_STOP = {hard_stop!r}\n"
+    )
+    body = '''
+
+def initialize(context):
+    context.set_universe([INSTRUMENT])
+    context.subscribe(frequency=TIMEFRAME)
+    context.set_warmup(2)
+    context.allow_leverage(max_leverage=100)
+    g.anchor_price = 0.0
+    g.long_next_level = 0
+    g.short_next_level = 0
+    g.long_target_value = 0.0
+    g.short_target_value = 0.0
+
+
+def _leg_position(side):
+    position = get_position(INSTRUMENT, position_side=side)
+    return float(position.amount or 0.0), float(position.avg_cost or 0.0)
+
+
+def _level_price(levels, index, current_price):
+    if not DYNAMIC_ANCHOR:
+        return float(levels[index] or 0.0)
+    if g.anchor_price <= 0:
+        g.anchor_price = float(current_price)
+    return float(levels[index] or 0.0) * g.anchor_price
+
+
+def _reset_leg(side):
+    if side == "long":
+        g.long_next_level = 0
+        g.long_target_value = 0.0
+    else:
+        g.short_next_level = 0
+        g.short_target_value = 0.0
+
+
+def _risk_exit_leg(side, price):
+    amount, average = _leg_position(side)
+    if amount == 0 or average <= 0:
+        return False
+    direction = 1.0 if side == "long" else -1.0
+    profit = ((price - average) / average) * direction
+    if TAKE_PROFIT > 0 and profit >= TAKE_PROFIT:
+        order_target_value(INSTRUMENT, 0.0, position_side=side, reason="neutral_grid_take_profit")
+        _reset_leg(side)
+        return True
+    if HARD_STOP > 0 and -profit >= HARD_STOP:
+        order_target_value(INSTRUMENT, 0.0, position_side=side, reason="neutral_grid_hard_stop")
+        _reset_leg(side)
+        return True
+    return False
+
+
+def handle_data(context, data):
+    bars = get_history(2, TIMEFRAME, ["high", "low", "close"], INSTRUMENT)
+    if len(bars) < 1:
+        return
+    current = bars.iloc[-1]
+    price = float(current["close"])
+    long_exited = _risk_exit_leg("long", price)
+    short_exited = _risk_exit_leg("short", price)
+
+    long_changed = False
+    while not long_exited and g.long_next_level < len(LONG_PRICE_LEVELS):
+        target = _level_price(LONG_PRICE_LEVELS, g.long_next_level, price)
+        if not float(current["low"]) <= target <= float(current["high"]):
+            break
+        weight = float(LONG_AMOUNT_WEIGHTS[g.long_next_level] or 0.0)
+        g.long_target_value += float(context.portfolio.starting_cash) * weight
+        g.long_next_level += 1
+        long_changed = True
+    if long_changed:
+        order_target_value(
+            INSTRUMENT,
+            g.long_target_value,
+            position_side="long",
+            reason="neutral_grid_long_level",
+        )
+
+    short_changed = False
+    while not short_exited and g.short_next_level < len(SHORT_PRICE_LEVELS):
+        target = _level_price(SHORT_PRICE_LEVELS, g.short_next_level, price)
+        if not float(current["low"]) <= target <= float(current["high"]):
+            break
+        weight = float(SHORT_AMOUNT_WEIGHTS[g.short_next_level] or 0.0)
+        g.short_target_value += float(context.portfolio.starting_cash) * weight
+        g.short_next_level += 1
+        short_changed = True
+    if short_changed:
+        order_target_value(
+            INSTRUMENT,
+            -g.short_target_value,
+            position_side="short",
+            reason="neutral_grid_short_level",
+        )
+'''
+    return constants + body
+
+
 def migrate_legacy_robot_v2_source(code: str, kind: str) -> str:
     """Convert legacy absolute robot allocations to run-capital weights."""
     source = str(code or "")
@@ -55,6 +196,14 @@ def build_robot_v2_source(
     timeframe: str,
 ) -> str:
     instrument = f"Crypto:{str(symbol or 'BTC/USDT').strip()}@{market_type}"
+    side = str(config.get("side") or "long").strip().lower()
+    if kind == "grid" and side == "neutral":
+        return _build_neutral_grid_v2_source(
+            config,
+            preview,
+            instrument=instrument,
+            timeframe=timeframe,
+        )
     levels = list(preview.get("levels") or [])
     prices = [float((item or {}).get("price") or 0.0) for item in levels]
     amounts = [float((item or {}).get("amount_quote") or 0.0) for item in levels]
@@ -71,7 +220,6 @@ def build_robot_v2_source(
         if dynamic_anchor and reference_price > 0
         else prices
     )
-    side = str(config.get("side") or "long").strip().lower()
     direction = -1.0 if side == "short" else 1.0
     if kind == "grid" and dynamic_anchor:
         actionable = [
@@ -88,7 +236,12 @@ def build_robot_v2_source(
         if total_amount > 0
         else [0.0 for _ in amounts]
     )
-    take_profit = float(config.get("take_profit_pct") or 0.0)
+    trailing_enabled = kind in {"dca", "martingale", "layered_martingale"} and bool(
+        config.get("trailing_take_profit_enabled")
+    )
+    trailing_activation = float(config.get("trailing_activation_pct") or 0.0)
+    trailing_callback = float(config.get("trailing_callback_pct") or 0.0)
+    take_profit = 0.0 if trailing_enabled else float(config.get("take_profit_pct") or 0.0)
     hard_stop = float(config.get("hard_stop_pct") or 0.0)
     initial_position_pct = float(config.get("initial_position_pct") or 0.0)
     level_capital_fraction = max(0.0, 1.0 - initial_position_pct) if kind == "grid" else 1.0
@@ -102,6 +255,9 @@ def build_robot_v2_source(
         f"DIRECTION = {direction!r}\n"
         f"TAKE_PROFIT = {take_profit!r}\n"
         f"HARD_STOP = {hard_stop!r}\n"
+        f"TRAILING_TAKE_PROFIT_ENABLED = {trailing_enabled!r}\n"
+        f"TRAILING_ACTIVATION = {trailing_activation!r}\n"
+        f"TRAILING_CALLBACK = {trailing_callback!r}\n"
         f"INITIAL_POSITION_PCT = {initial_position_pct!r}\n"
         f"LEVEL_CAPITAL_FRACTION = {level_capital_fraction!r}\n"
     )
@@ -219,6 +375,14 @@ def handle_data(context, data):
         return
     g.target_value += float(context.portfolio.starting_cash) * LEVEL_CAPITAL_FRACTION * float(AMOUNT_WEIGHTS[g.next_level] or 0.0)
     g.next_level += 1
-    order_target_value(INSTRUMENT, DIRECTION * g.target_value, reason="robot_level")
+    order_target_value(
+        INSTRUMENT,
+        DIRECTION * g.target_value,
+        reason="robot_level",
+        stop_loss_pct=HARD_STOP,
+        take_profit_pct=TAKE_PROFIT,
+        trailing_stop_pct=TRAILING_CALLBACK if TRAILING_TAKE_PROFIT_ENABLED else 0.0,
+        trailing_activation_pct=TRAILING_ACTIVATION if TRAILING_TAKE_PROFIT_ENABLED else 0.0,
+    )
 '''
     return constants + initialize + helpers + handler

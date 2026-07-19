@@ -1,4 +1,5 @@
 import pandas as pd
+import pytest
 
 from app.services.strategy_v2 import StrategyV2BacktestRunner, StrategyV2LiveSession
 from app.services.strategy_v2.data import MultiAssetDataPortal
@@ -60,6 +61,71 @@ def rebalance(context, data):
     assert {trade["symbol"] for trade in result["rawTrades"]} == {"USStock:AAPL", "USStock:MSFT"}
     assert result["totalExecutions"] >= 2
     assert result["finalEquity"] > 10000
+
+
+def test_result_distinguishes_total_return_from_peak_to_trough_drawdown():
+    runner = StrategyV2BacktestRunner(
+        code="""
+def initialize(context):
+    context.set_universe(["USStock:AAPL"])
+    context.subscribe(frequency="1d")
+
+def handle_data(context, data):
+    pass
+""",
+        frames={"USStock:AAPL": _frame([100, 101, 102])},
+        initial_capital=100,
+        commission=0,
+        slippage=0,
+    )
+    runner.broker.equity_curve = [
+        {"time": "2026-01-01", "value": 100.0},
+        {"time": "2026-01-02", "value": 135.6793190007},
+        {"time": "2026-01-03", "value": 94.5187761357},
+    ]
+    runner.broker.portfolio.total_value = 94.5187761357
+
+    result = runner._result()
+
+    assert result["totalReturn"] == pytest.approx(-5.4812238643)
+    assert result["maxDrawdown"] == pytest.approx(-30.3366372769)
+    assert result["maxDrawdownPeakEquity"] == pytest.approx(135.6793190007)
+    assert result["maxDrawdownTroughEquity"] == pytest.approx(94.5187761357)
+    assert result["maxDrawdownPeakTime"] == "2026-01-02"
+    assert result["maxDrawdownTroughTime"] == "2026-01-03"
+    assert result["equityCurve"][-1]["drawdown"] == pytest.approx(-30.3366372769)
+
+
+def test_drawdown_uses_initial_capital_before_the_first_equity_sample():
+    runner = StrategyV2BacktestRunner(
+        code="""
+def initialize(context):
+    context.set_universe(["USStock:AAPL"])
+    context.subscribe(frequency="1d")
+
+def handle_data(context, data):
+    pass
+""",
+        frames={"USStock:AAPL": _frame([100, 101, 102])},
+        initial_capital=100,
+        commission=0,
+        slippage=0,
+    )
+    runner.broker.equity_curve = [
+        {"time": "2026-01-01", "value": 99.0},
+        {"time": "2026-01-02", "value": 101.0},
+        {"time": "2026-01-03", "value": 100.0},
+    ]
+    runner.broker.portfolio.total_value = 100.0
+
+    result = runner._result()
+
+    assert result["maxDrawdown"] == pytest.approx(-1.0)
+    assert result["maxDrawdownPeakEquity"] == pytest.approx(100.0)
+    assert result["maxDrawdownTroughEquity"] == pytest.approx(99.0)
+    assert result["maxDrawdownPeakTime"] == "2026-01-01"
+    assert result["maxDrawdownTroughTime"] == "2026-01-01"
+    assert result["equityCurve"][0]["drawdown"] == pytest.approx(-1.0)
 
 
 def test_history_is_point_in_time_and_close_signal_fills_next_open():
@@ -264,6 +330,76 @@ def handle_data(context, data):
     assert next_orders == []
     assert first_timestamp == duplicate_timestamp
     assert next_timestamp > first_timestamp
+
+
+def test_live_daily_schedule_uses_wall_clock_without_startup_catch_up():
+    code = """
+def initialize(context):
+    context.set_universe(["USStock:AAPL"])
+    context.subscribe(frequency="1d")
+    run_daily(rebalance, time="09:35")
+
+def rebalance(context, data):
+    order_target_percent("AAPL", 0.5)
+"""
+    frames = {"USStock:AAPL": _frame([100, 101])}
+    session = StrategyV2LiveSession(
+        code=code,
+        frames=frames,
+        initial_capital=10000,
+        schedule_timezone="Asia/Shanghai",
+    )
+
+    startup_orders, _, _ = session.process(
+        frames,
+        schedule_time="2026-07-18 22:57:42+08:00",
+    )
+    early_orders, _, _ = session.process(
+        frames,
+        schedule_time="2026-07-19 09:34:59+08:00",
+    )
+    due_orders, _, _ = session.process(
+        frames,
+        schedule_time="2026-07-19 09:35:00+08:00",
+    )
+    duplicate_orders, _, _ = session.process(
+        frames,
+        schedule_time="2026-07-19 09:36:00+08:00",
+    )
+
+    assert startup_orders == []
+    assert early_orders == []
+    assert len(due_orders) == 1
+    assert due_orders[0].signal_time == pd.Timestamp("2026-07-19 09:35:00+08:00")
+    assert duplicate_orders == []
+
+
+def test_live_daily_schedule_fires_without_a_new_daily_bar():
+    code = """
+def initialize(context):
+    context.set_universe(["USStock:AAPL"])
+    context.subscribe(frequency="1d")
+    run_daily(rebalance, time="09:35")
+
+def rebalance(context, data):
+    order("AAPL", 1)
+"""
+    frames = {"USStock:AAPL": _frame([100])}
+    session = StrategyV2LiveSession(
+        code=code,
+        frames=frames,
+        initial_capital=10000,
+        schedule_timezone="Asia/Shanghai",
+    )
+
+    session.process(frames, schedule_time="2026-07-19 09:34:00+08:00")
+    orders, _, timestamp = session.process(
+        frames,
+        schedule_time="2026-07-19 09:35:00+08:00",
+    )
+
+    assert len(orders) == 1
+    assert timestamp == frames["USStock:AAPL"].index[-1]
 
 
 def test_get_fundamentals_resolves_public_api_field_aliases():

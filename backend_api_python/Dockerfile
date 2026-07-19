@@ -50,13 +50,16 @@ COPY requirements.txt requirements.lock ./
 # Pip: when BUILD_REGION=cn, try Aliyun PyPI first; on any failure retry default index.
 # Otherwise install from PyPI official directly.
 RUN set -eux; \
-    python -m pip install --no-cache-dir --upgrade "pip>=26.1.2,<27"; \
     if [ "$BUILD_REGION" = "cn" ]; then \
+      python -m pip install --no-cache-dir --timeout 180 --retries 5 --upgrade \
+          -i https://mirrors.aliyun.com/pypi/simple/ \
+          "pip>=26.1.2,<27"; \
       pip install --no-cache-dir --prefer-binary --timeout 180 \
           -i https://mirrors.aliyun.com/pypi/simple/ \
           -r requirements.lock \
         || pip install --no-cache-dir --prefer-binary --timeout 180 -r requirements.lock; \
     else \
+      python -m pip install --no-cache-dir --timeout 180 --retries 5 --upgrade "pip>=26.1.2,<27"; \
       pip install --no-cache-dir --prefer-binary --timeout 180 -r requirements.lock; \
     fi; \
     apt-get purge -y --auto-remove build-essential python3-dev libffi-dev libssl-dev; \

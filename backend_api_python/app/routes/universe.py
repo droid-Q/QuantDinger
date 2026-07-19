@@ -81,7 +81,7 @@ def system_universe_overview():
 def sync_system_universes():
     try:
         from datetime import date
-        from scripts.refresh_public_universe_snapshots import HK_FACTSHEETS, LOADERS, apply_snapshot
+        from scripts.refresh_public_universe_snapshots import EXPECTED_MEMBER_COUNTS, LOADERS, apply_snapshot
 
         payload = request.get_json(silent=True) or {}
         requested = payload.get("codes") or list(LOADERS)
@@ -89,20 +89,28 @@ def sync_system_universes():
         if not codes or any(code not in LOADERS for code in codes):
             raise UniverseError("universe.invalidSyncSelection")
         as_of = date.fromisoformat(str(payload.get("as_of") or payload.get("asOf") or date.today().isoformat()))
-        expected = {
-            "csi300": (300, 300), "csi500": (500, 500), "sp500": (500, 510),
-            "nasdaq100": (100, 102), "crypto_top100": (95, 100),
-            "hk_etf": (1, 1000), "us_etf": (1, 1000),
-            **{code: (count, count) for code, (_factsheet, count) in HK_FACTSHEETS.items()},
-        }
         results = []
+        errors = []
         for code in codes:
-            members = LOADERS[code]()
-            count = len({item.get("symbol") for item in members if item.get("symbol")})
-            minimum, maximum = expected[code]
-            if not minimum <= count <= maximum:
-                raise RuntimeError(f"{code} member count failed validation: {count}")
-            results.append(apply_snapshot(code, members, as_of))
+            try:
+                members = LOADERS[code]()
+                count = len({item.get("symbol") for item in members if item.get("symbol")})
+                minimum, maximum = EXPECTED_MEMBER_COUNTS[code]
+                if not minimum <= count <= maximum:
+                    raise RuntimeError(
+                        f"member count failed validation: {count}; expected {minimum}..{maximum}"
+                    )
+                results.append(apply_snapshot(code, members, as_of))
+            except Exception as exc:
+                logger.exception("system universe sync failed for code=%s", code)
+                errors.append({"code": code, "error": str(exc)})
+        if errors:
+            message = "universe.syncPartial" if results else "universe.syncFailed"
+            return jsonify({
+                "code": 0,
+                "msg": message,
+                "data": {"as_of": as_of.isoformat(), "results": results, "errors": errors},
+            }), 500
         return _success({"as_of": as_of.isoformat(), "results": results})
     except UniverseError as exc:
         return _failure(exc)

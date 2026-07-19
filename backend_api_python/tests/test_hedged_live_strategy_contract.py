@@ -32,6 +32,20 @@ def _strategy(strategy_id: int, side: str, *, status: str = "running") -> dict:
     }
 
 
+def _neutral_grid_strategy(strategy_id: int = 20) -> dict:
+    row = _strategy(strategy_id, "neutral")
+    row["trading_config"].update({
+        "bot_type": "grid",
+        "bot_params": {
+            "gridDirection": "neutral",
+            "lowerPrice": 0.98,
+            "upperPrice": 1.02,
+            "dynamicAnchor": True,
+        },
+    })
+    return row
+
+
 def test_position_reader_returns_existing_leg_size(monkeypatch):
     monkeypatch.setattr(records, "_fetch_position_fuzzy", lambda *_args: ({"size": "1.25"}, "BTC/USDT"))
     assert records.fetch_position_size_for_side(3, "BTCUSDT", "long") == pytest.approx(1.25)
@@ -175,6 +189,61 @@ def test_swap_preflight_accepts_confirmed_hedge_mode(monkeypatch):
     )
     executor._preflight_live_strategy(20)
     assert conflict_calls == [{"allow_opposite_leg": True}]
+
+
+def test_neutral_grid_preflight_requires_confirmed_hedge_mode(monkeypatch):
+    from app.services.grid import exchange_requirements
+    from app.services.live_trading import factory
+    from app.services import exchange_execution
+
+    executor = TradingExecutor()
+    monkeypatch.setattr(executor, "_load_strategy", lambda _sid: _neutral_grid_strategy())
+    monkeypatch.setattr(strategy_live_guard, "find_live_strategy_conflict", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(exchange_execution, "resolve_exchange_config", lambda *_args, **_kwargs: {"exchange_id": "okx"})
+    monkeypatch.setattr(factory, "create_client", lambda *_args, **_kwargs: object())
+    monkeypatch.setattr(
+        exchange_requirements,
+        "detect_hedge_position_mode",
+        lambda *_args, **_kwargs: (False, "okx_net_mode"),
+    )
+
+    with pytest.raises(RuntimeError, match="strategyV2.neutralGridHedgeModeRequired"):
+        executor._preflight_live_strategy(20)
+
+
+def test_neutral_grid_preflight_owns_both_legs(monkeypatch):
+    from app.services.grid import exchange_requirements
+    from app.services.live_trading import factory
+    from app.services import exchange_execution
+
+    executor = TradingExecutor()
+    monkeypatch.setattr(executor, "_load_strategy", lambda _sid: _neutral_grid_strategy())
+    conflict_calls = []
+    monkeypatch.setattr(
+        strategy_live_guard,
+        "find_live_strategy_conflict",
+        lambda *_args, **kwargs: conflict_calls.append(kwargs) or None,
+    )
+    monkeypatch.setattr(exchange_execution, "resolve_exchange_config", lambda *_args, **_kwargs: {"exchange_id": "okx"})
+    monkeypatch.setattr(factory, "create_client", lambda *_args, **_kwargs: object())
+    monkeypatch.setattr(
+        exchange_requirements,
+        "detect_hedge_position_mode",
+        lambda *_args, **_kwargs: (True, "okx_long_short_mode"),
+    )
+
+    executor._preflight_live_strategy(20)
+    assert conflict_calls == [{"allow_opposite_leg": False}]
+
+
+def test_dynamic_grid_anchor_materializes_absolute_live_bounds():
+    source = _neutral_grid_strategy()["trading_config"]
+    runtime = TradingExecutor._materialize_grid_anchor(source, 50_000.0)
+
+    assert runtime["bot_params"]["lowerPrice"] == pytest.approx(49_000.0)
+    assert runtime["bot_params"]["upperPrice"] == pytest.approx(51_000.0)
+    assert runtime["bot_params"]["dynamicAnchor"] is False
+    assert source["bot_params"]["lowerPrice"] == 0.98
 
 
 def test_restart_recovery_repeats_live_preflight(monkeypatch):

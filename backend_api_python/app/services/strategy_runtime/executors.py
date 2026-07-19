@@ -27,7 +27,7 @@ def executor_engine_compatibility() -> Dict[str, Any]:
         },
         "markets": ["Crypto"],
         "market_types": ["spot", "swap"],
-        "sides": ["long", "short"],
+        "sides": ["long", "short", "neutral"],
     }
 
 
@@ -45,11 +45,63 @@ def _int(value: Any, default: int = 0) -> int:
         return int(default)
 
 
+def _bool(value: Any, default: bool = False) -> bool:
+    if value is None:
+        return bool(default)
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        return bool(value)
+    return str(value).strip().lower() in {"1", "true", "yes", "on"}
+
+
 def _ratio(value: Any, default: float = 0.0) -> float:
     out = _float(value, default)
     if abs(out) > 1:
         out = out / 100.0
     return out
+
+
+def _trailing_take_profit_config(
+    cfg: Dict[str, Any],
+    *,
+    default_activation: float,
+) -> Dict[str, Any]:
+    activation_raw = (
+        cfg.get("trailing_activation_pct")
+        if "trailing_activation_pct" in cfg
+        else cfg.get("trailingActivationPct")
+    )
+    callback_raw = (
+        cfg.get("trailing_callback_pct")
+        if "trailing_callback_pct" in cfg
+        else cfg.get("trailingCallbackPct")
+    )
+    enabled = _bool(
+        cfg.get("trailing_take_profit_enabled")
+        if "trailing_take_profit_enabled" in cfg
+        else cfg.get("trailingTakeProfitEnabled"),
+        True,
+    )
+    activation = max(
+        0.0,
+        _ratio(
+            activation_raw,
+            default_activation,
+        ),
+    )
+    callback = max(
+        0.0,
+        _ratio(
+            callback_raw,
+            0.002,
+        ),
+    )
+    return {
+        "trailing_take_profit_enabled": enabled,
+        "trailing_activation_pct": activation,
+        "trailing_callback_pct": callback,
+    }
 
 
 def _ratio_list(value: Any, defaults: List[float], *, expected: int = 0) -> List[float]:
@@ -243,6 +295,9 @@ def executor_templates() -> Dict[str, Any]:
                     "volume_multiplier": 1.15,
                     "max_layers": 5,
                     "take_profit_pct": 0.006,
+                    "trailing_take_profit_enabled": True,
+                    "trailing_activation_pct": 0.006,
+                    "trailing_callback_pct": 0.002,
                     "max_entry_drift_pct": 0.03,
                 },
             },
@@ -261,6 +316,9 @@ def executor_templates() -> Dict[str, Any]:
                     "volume_multiplier": 1.6,
                     "max_layers": 5,
                     "take_profit_pct": 0.005,
+                    "trailing_take_profit_enabled": True,
+                    "trailing_activation_pct": 0.005,
+                    "trailing_callback_pct": 0.002,
                     "hard_stop_pct": 0.12,
                     "max_entry_drift_pct": 0.03,
                 },
@@ -284,6 +342,9 @@ def executor_templates() -> Dict[str, Any]:
                     "inter_spacing_3_pct": 0.018,
                     "inter_spacing_4_pct": 0.022,
                     "take_profit_pct": 0.006,
+                    "trailing_take_profit_enabled": True,
+                    "trailing_activation_pct": 0.006,
+                    "trailing_callback_pct": 0.002,
                     "hard_stop_pct": 0.12,
                     "max_entry_drift_pct": 0.03,
                 },
@@ -311,8 +372,6 @@ def build_executor_strategy_payload(payload: Dict[str, Any], *, user_id: int) ->
     executor_config["dynamic_anchor"] = bool(cfg.get("dynamic_anchor"))
     if cfg["market_type"] == "spot":
         executor_config["side"] = "long"
-    if trade_direction == "neutral":
-        raise ValueError("V2_GRID_NEUTRAL_UNSUPPORTED")
     leverage_enabled = cfg["market_type"] == "swap" and cfg["leverage"] > 1
     trading_config = {
         "api_version": 2,
@@ -321,6 +380,35 @@ def build_executor_strategy_payload(payload: Dict[str, Any], *, user_id: int) ->
         "executor_config": executor_config,
         "executor_preview": preview,
     }
+    if kind == "grid" and trade_direction == "neutral":
+        grid_count = max(2, int(executor_config.get("grid_count") or 2))
+        total_amount = max(0.0, float(executor_config.get("total_amount_quote") or 0.0))
+        trading_config.update({
+            "bot_type": "grid",
+            "symbol": cfg["symbol"],
+            "market_type": cfg["market_type"],
+            "leverage": cfg["leverage"],
+            "margin_mode": str(cfg.get("margin_mode") or cfg.get("marginMode") or "cross"),
+            "stop_loss_pct": float(executor_config.get("hard_stop_pct") or 0.0),
+            "take_profit_pct": float(executor_config.get("take_profit_pct") or 0.0),
+            "bot_params": {
+                "upperPrice": float(executor_config.get("end_price") or 0.0),
+                "lowerPrice": float(executor_config.get("start_price") or 0.0),
+                "gridCount": grid_count,
+                "amountPerGrid": total_amount / grid_count if grid_count else 0.0,
+                "gridMode": str(executor_config.get("grid_mode") or "arithmetic"),
+                "gridDirection": "neutral",
+                "initialPositionPct": 0.0,
+                "orderMode": "maker",
+                "boundaryAction": "pause",
+                "maxOpenOrders": int(executor_config.get("max_open_orders") or 4),
+                "minSpreadBetweenOrders": float(
+                    executor_config.get("min_spread_between_orders") or 0.0
+                ),
+                "orderFrequency": int(executor_config.get("order_frequency") or 0),
+                "dynamicAnchor": bool(executor_config.get("dynamic_anchor")),
+            },
+        })
     generated_code = _executor_code(
         kind,
         executor_config,
@@ -375,27 +463,30 @@ def _preview_grid(cfg: Dict[str, Any]) -> ExecutorPreview:
     side = cfg["side"]
     mode = str(cfg.get("grid_mode") or cfg.get("gridMode") or "arithmetic").strip().lower()
     take_profit = max(0.0, _ratio(cfg.get("take_profit_pct") or cfg.get("takeProfitPct"), 0.004))
+    hard_stop = max(0.0, _ratio(cfg.get("hard_stop_pct") or cfg.get("hardStopPct"), 0.0))
     warnings: List[str] = []
     if start <= 0 or end <= 0 or start == end:
         warnings.append("invalid_price_bounds")
     low, high = sorted([start, end])
     prices = _geospace(low, high, count) if mode == "geometric" else _linspace(low, high, count)
+    reference = (low + high) / 2.0
     if side == "long":
         prices = sorted(prices, reverse=True)
     if bool(cfg.get("dynamic_anchor")):
-        reference = (low + high) / 2.0
         actionable = [
             price for price in prices
             if (side == "long" and price < reference) or (side == "short" and price > reference)
         ]
         if actionable:
             prices = actionable
+    if side == "neutral":
+        prices = [price for price in prices if abs(price - reference) > 1e-10]
     amount = total / max(1, len(prices))
     levels = []
     for idx, price in enumerate(prices, start=1):
         level_side = side
         if side == "neutral":
-            level_side = "long" if idx <= len(prices) / 2.0 else "short"
+            level_side = "long" if price < reference else "short"
         tp = price * (1.0 + take_profit) if level_side == "long" else price * (1.0 - take_profit)
         levels.append(ExecutorLevel(idx, "open", level_side, price, amount, tp, 0.0))
     initial_position_raw = (
@@ -417,6 +508,7 @@ def _preview_grid(cfg: Dict[str, Any]) -> ExecutorPreview:
         "total_amount_quote": total,
         "initial_position_pct": initial_position_pct,
         "take_profit_pct": take_profit,
+        "hard_stop_pct": hard_stop,
         "max_open_orders": max(1, _int(cfg.get("max_open_orders") or cfg.get("maxOpenOrders"), 4)),
         "min_spread_between_orders": max(0.0, _ratio(cfg.get("min_spread_between_orders") or cfg.get("minSpreadBetweenOrders"), 0.0005)),
         "order_frequency": max(0, _int(cfg.get("order_frequency") or cfg.get("orderFrequency"), 0)),
@@ -439,6 +531,7 @@ def _preview_layered_martingale(cfg: Dict[str, Any]) -> ExecutorPreview:
     base = max(0.0, _float(cfg.get("base_order_size") or cfg.get("baseOrderSize"), 0.0))
     volume_mult = max(1.0, _float(cfg.get("volume_multiplier") or cfg.get("volumeMultiplier"), 1.8))
     take_profit = max(0.0, _ratio(cfg.get("take_profit_pct") or cfg.get("takeProfitPct"), 0.006))
+    trailing = _trailing_take_profit_config(cfg, default_activation=take_profit)
     hard_stop = max(0.0, _ratio(cfg.get("hard_stop_pct") or cfg.get("hardStopPct"), 0.0))
     max_entry_drift = max(0.0, _ratio(cfg.get("max_entry_drift_pct") or cfg.get("maxEntryDriftPct"), 0.03))
     side = cfg["side"]
@@ -467,6 +560,12 @@ def _preview_layered_martingale(cfg: Dict[str, Any]) -> ExecutorPreview:
         warnings.append("missing_entry_price")
     if base <= 0:
         warnings.append("missing_base_order_size")
+    if trailing["trailing_take_profit_enabled"] and (
+        trailing["trailing_activation_pct"] <= 0
+        or trailing["trailing_callback_pct"] <= 0
+        or trailing["trailing_callback_pct"] >= trailing["trailing_activation_pct"]
+    ):
+        warnings.append("invalid_trailing_take_profit")
     levels: List[ExecutorLevel] = []
     price = entry
     seq = 1
@@ -489,11 +588,16 @@ def _preview_layered_martingale(cfg: Dict[str, Any]) -> ExecutorPreview:
             cumulative_quote += amount
             if price > 0:
                 cumulative_quantity += amount / price
+            exit_reference = (
+                trailing["trailing_activation_pct"]
+                if trailing["trailing_take_profit_enabled"]
+                else take_profit
+            )
             tp = _basket_take_profit_price(
                 total_quote=cumulative_quote,
                 total_quantity=cumulative_quantity,
                 side=side,
-                take_profit=take_profit,
+                take_profit=exit_reference,
             )
             levels.append(
                 ExecutorLevel(
@@ -520,6 +624,7 @@ def _preview_layered_martingale(cfg: Dict[str, Any]) -> ExecutorPreview:
         "intra_spacings": intra_spacings,
         "inter_spacings": inter_spacings,
         "take_profit_pct": take_profit,
+        **trailing,
         "hard_stop_pct": hard_stop,
         "max_entry_drift_pct": max_entry_drift,
     }
@@ -535,6 +640,7 @@ def _preview_layered_dca(cfg: Dict[str, Any], kind: str) -> ExecutorPreview:
     step_mult = max(1.0, _float(cfg.get("step_multiplier") or cfg.get("stepMultiplier"), 1.0))
     volume_mult = max(1.0, _float(cfg.get("volume_multiplier") or cfg.get("volumeMultiplier"), 1.0))
     take_profit = max(0.0, _ratio(cfg.get("take_profit_pct") or cfg.get("takeProfitPct"), 0.005))
+    trailing = _trailing_take_profit_config(cfg, default_activation=take_profit)
     max_entry_drift = max(0.0, _ratio(cfg.get("max_entry_drift_pct") or cfg.get("maxEntryDriftPct"), 0.03))
     side = cfg["side"]
     warnings: List[str] = []
@@ -542,6 +648,12 @@ def _preview_layered_dca(cfg: Dict[str, Any], kind: str) -> ExecutorPreview:
         warnings.append("missing_entry_price")
     if base <= 0:
         warnings.append("missing_base_order_size")
+    if trailing["trailing_take_profit_enabled"] and (
+        trailing["trailing_activation_pct"] <= 0
+        or trailing["trailing_callback_pct"] <= 0
+        or trailing["trailing_callback_pct"] >= trailing["trailing_activation_pct"]
+    ):
+        warnings.append("invalid_trailing_take_profit")
     levels = []
     cumulative_deviation = 0.0
     cumulative_quote = 0.0
@@ -559,11 +671,16 @@ def _preview_layered_dca(cfg: Dict[str, Any], kind: str) -> ExecutorPreview:
         cumulative_quote += amount
         if price > 0:
             cumulative_quantity += amount / price
+        exit_reference = (
+            trailing["trailing_activation_pct"]
+            if trailing["trailing_take_profit_enabled"]
+            else take_profit
+        )
         tp = _basket_take_profit_price(
             total_quote=cumulative_quote,
             total_quantity=cumulative_quantity,
             side=side,
-            take_profit=take_profit,
+            take_profit=exit_reference,
         )
         levels.append(ExecutorLevel(layer, "open" if layer == 1 else "add", side, price, amount, tp, trigger))
     config = {
@@ -577,6 +694,7 @@ def _preview_layered_dca(cfg: Dict[str, Any], kind: str) -> ExecutorPreview:
         "step_multiplier": step_mult,
         "volume_multiplier": volume_mult,
         "take_profit_pct": take_profit,
+        **trailing,
         "hard_stop_pct": max(0.0, _ratio(cfg.get("hard_stop_pct") or cfg.get("hardStopPct"), 0.0)),
         "max_entry_drift_pct": max_entry_drift,
     }

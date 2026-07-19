@@ -7,12 +7,16 @@ exposes a curated tool surface for agent clients.
 from __future__ import annotations
 
 import os
+import secrets
 import sys
 from typing import Any
 
 import httpx
+from mcp.server.auth.provider import AccessToken
+from mcp.server.auth.settings import AuthSettings
 from mcp.server.fastmcp import FastMCP
 
+from . import __version__
 from .security import (
     assert_code_size,
     assert_indicator_code_size,
@@ -47,9 +51,17 @@ MCP_TOOL_NAMES = (
     "get_indicator",
     "create_strategy",
     "update_strategy",
+    "list_strategy_templates",
+    "compile_strategy_code",
+    "list_strategy_sources",
+    "get_strategy_source",
+    "save_strategy_source",
+    "list_strategy_source_versions",
+    "restore_strategy_source_version",
     "submit_backtest",
     "list_portfolio_positions",
     "list_paper_orders",
+    "cancel_open_paper_orders",
 )
 
 
@@ -61,12 +73,67 @@ def _env(name: str, required: bool = True) -> str:
     return value
 
 
+def _env_float(name: str, default: float) -> float:
+    raw = (os.environ.get(name) or "").strip()
+    if not raw:
+        return default
+    try:
+        return float(raw)
+    except ValueError:
+        print(f"[quantdinger-mcp] invalid {name}='{raw}', using {default}.", file=sys.stderr)
+        return default
+
+
+def _env_int(name: str, default: int) -> int:
+    raw = (os.environ.get(name) or "").strip()
+    if not raw:
+        return default
+    try:
+        return int(raw)
+    except ValueError:
+        print(f"[quantdinger-mcp] invalid {name}='{raw}', using {default}.", file=sys.stderr)
+        return default
+
+
+def _truthy_env(name: str) -> bool:
+    return (os.environ.get(name) or "").strip().lower() in {"1", "true", "yes", "on"}
+
+
 BASE_URL = _env("QUANTDINGER_BASE_URL").rstrip("/")
 AGENT_TOKEN = _env("QUANTDINGER_AGENT_TOKEN")
-TIMEOUT_S = float(os.environ.get("QUANTDINGER_TIMEOUT_S", "60"))
-JOB_STREAM_MAX_EVENTS = int(os.environ.get("QUANTDINGER_MCP_JOB_STREAM_MAX_EVENTS", "200"))
-JOB_STREAM_MAX_SECONDS = float(os.environ.get("QUANTDINGER_MCP_JOB_STREAM_MAX_SECONDS", "300"))
-JOB_POLL_MAX_SECONDS = float(os.environ.get("QUANTDINGER_MCP_JOB_POLL_MAX_SECONDS", "300"))
+TIMEOUT_S = _env_float("QUANTDINGER_TIMEOUT_S", 60.0)
+JOB_STREAM_MAX_EVENTS = _env_int("QUANTDINGER_MCP_JOB_STREAM_MAX_EVENTS", 200)
+JOB_STREAM_MAX_SECONDS = _env_float("QUANTDINGER_MCP_JOB_STREAM_MAX_SECONDS", 300.0)
+JOB_POLL_MAX_SECONDS = _env_float("QUANTDINGER_MCP_JOB_POLL_MAX_SECONDS", 300.0)
+MCP_HOST = (os.environ.get("QUANTDINGER_MCP_HOST") or "127.0.0.1").strip()
+MCP_PORT = _env_int("QUANTDINGER_MCP_PORT", 8000)
+MCP_AUTH_TOKEN = _env("QUANTDINGER_MCP_AUTH_TOKEN", required=False)
+MCP_PUBLIC_URL = _env("QUANTDINGER_MCP_PUBLIC_URL", required=False).rstrip("/")
+
+
+class _StaticTokenVerifier:
+    async def verify_token(self, token: str) -> AccessToken | None:
+        if not MCP_AUTH_TOKEN or not secrets.compare_digest(token, MCP_AUTH_TOKEN):
+            return None
+        return AccessToken(
+            token=token,
+            client_id="quantdinger-mcp-client",
+            scopes=["mcp"],
+        )
+
+
+def _http_auth_config() -> tuple[AuthSettings | None, _StaticTokenVerifier | None]:
+    if not MCP_AUTH_TOKEN:
+        return None, None
+    public_url = MCP_PUBLIC_URL or f"http://127.0.0.1:{MCP_PORT}"
+    return (
+        AuthSettings(
+            issuer_url=public_url,
+            resource_server_url=public_url,
+            required_scopes=["mcp"],
+        ),
+        _StaticTokenVerifier(),
+    )
 
 
 _client = httpx.Client(
@@ -78,15 +145,36 @@ _public_client = httpx.Client(base_url=BASE_URL, timeout=min(TIMEOUT_S, 15.0))
 
 
 def _get(path: str, params: dict | None = None) -> Any:
-    return _unwrap(_client.get(path, params=params or {}))
+    return _request("GET", path, params=params or {})
 
 
 def _post(path: str, json: dict | None = None, headers: dict | None = None) -> Any:
-    return _unwrap(_client.post(path, json=json or {}, headers=headers or {}))
+    return _request("POST", path, json=json or {}, headers=headers or {})
 
 
 def _patch(path: str, json: dict | None = None) -> Any:
-    return _unwrap(_client.patch(path, json=json or {}))
+    return _request("PATCH", path, json=json or {})
+
+
+def _request(method: str, path: str, **kwargs: Any) -> Any:
+    try:
+        return _unwrap(_client.request(method, path, **kwargs))
+    except httpx.TimeoutException:
+        return {
+            "error": True,
+            "status": 504,
+            "body": {"message": "QuantDinger Agent Gateway request timed out", "retriable": True},
+        }
+    except httpx.RequestError as exc:
+        return {
+            "error": True,
+            "status": 503,
+            "body": {
+                "message": "QuantDinger Agent Gateway is unavailable",
+                "retriable": True,
+                "details": str(exc),
+            },
+        }
 
 
 def _unwrap(r: httpx.Response) -> Any:
@@ -102,8 +190,14 @@ def _unwrap(r: httpx.Response) -> Any:
     return redact_secrets(body) if isinstance(body, (dict, list)) else body
 
 
+_auth_settings, _token_verifier = _http_auth_config()
+
 mcp = FastMCP(
     "quantdinger",
+    host=MCP_HOST,
+    port=MCP_PORT,
+    auth=_auth_settings,
+    token_verifier=_token_verifier,
     instructions=(
         "Tools for the QuantDinger self-hosted quant platform. "
         "All tools are tenant-scoped via the configured agent token. "
@@ -120,12 +214,15 @@ mcp = FastMCP(
         "directly. "
         "STRATEGY WORKFLOW: executable strategies use the Strategy API V2 "
         "manifest, initialize(context), and handle_data(context, data) contract. "
-        "Use create_strategy with a saved source_id, and submit_backtest with "
-        "Strategy API V2 Python code. "
+        "Use list_strategy_templates, compile_strategy_code, and "
+        "save_strategy_source before create_strategy. Source versions can be "
+        "listed and restored only with explicit confirmation. submit_backtest "
+        "accepts Strategy API V2 Python code. "
         "Long jobs: use wait_for_job or stream_job_until_done (bounded). "
         "Never pass natural language to backtest `code`."
     ),
 )
+mcp._mcp_server.version = __version__
 
 
 # Read-class tools
@@ -140,7 +237,12 @@ def whoami() -> Any:
 @mcp.tool()
 def check_health() -> Any:
     """Public liveness probe (no token required). Does not expose tenant data."""
-    r = _public_client.get("/api/agent/v1/health")
+    try:
+        r = _public_client.get("/api/agent/v1/health")
+    except httpx.TimeoutException:
+        return {"ok": False, "status": 504, "retriable": True}
+    except httpx.RequestError as exc:
+        return {"ok": False, "status": 503, "retriable": True, "details": str(exc)}
     try:
         body = r.json()
     except Exception:
@@ -445,6 +547,99 @@ def update_strategy(strategy_id: int, patch: dict) -> Any:
     return _patch(f"/api/agent/v1/strategies/{int(strategy_id)}", json=body)
 
 
+# Strategy API V2 source workspace
+
+
+@mcp.tool()
+def list_strategy_templates(limit: int = 20) -> Any:
+    """List system Strategy API V2 templates, including starter source code."""
+    limit = max(1, min(100, int(limit)))
+    return _get("/api/agent/v1/strategy-sources/templates", params={"limit": limit})
+
+
+@mcp.tool()
+def compile_strategy_code(code: str | None = None, source_id: int | None = None) -> Any:
+    """Compile Strategy API V2 code and return its canonical manifest without saving."""
+    payload: dict[str, Any] = {}
+    if code is not None:
+        assert_code_size(code, label="Strategy code")
+        payload["code"] = code
+    if source_id is not None:
+        payload["source_id"] = int(source_id)
+    if not payload:
+        raise ValueError("code or source_id is required")
+    return _post("/api/agent/v1/strategy-sources/compile", json=payload)
+
+
+@mcp.tool()
+def list_strategy_sources(limit: int = 50) -> Any:
+    """List saved Strategy API V2 sources without code bodies."""
+    limit = max(1, min(200, int(limit)))
+    return _get("/api/agent/v1/strategy-sources", params={"limit": limit})
+
+
+@mcp.tool()
+def get_strategy_source(source_id: int) -> Any:
+    """Get one tenant-owned Strategy API V2 source including code."""
+    return _get(f"/api/agent/v1/strategy-sources/{int(source_id)}")
+
+
+@mcp.tool()
+def save_strategy_source(
+    name: str,
+    code: str,
+    description: str = "",
+    source_id: int | None = None,
+    template_key: str | None = None,
+    param_schema: dict | None = None,
+    metadata: dict | None = None,
+) -> Any:
+    """Compile and save a private Strategy API V2 source, creating a version snapshot."""
+    assert_code_size(code, label="Strategy code")
+    payload: dict[str, Any] = {
+        "name": str(name).strip(),
+        "description": str(description or ""),
+        "code": code,
+        "param_schema": assert_json_dict("param_schema", param_schema),
+        "metadata": assert_json_dict("metadata", metadata),
+    }
+    if template_key:
+        payload["template_key"] = str(template_key)
+    if source_id is None:
+        return _post("/api/agent/v1/strategy-sources", json=payload)
+    return _patch(f"/api/agent/v1/strategy-sources/{int(source_id)}", json=payload)
+
+
+@mcp.tool()
+def list_strategy_source_versions(source_id: int) -> Any:
+    """List immutable version snapshots for one tenant-owned strategy source."""
+    return _get(f"/api/agent/v1/strategy-sources/{int(source_id)}/versions")
+
+
+@mcp.tool()
+def restore_strategy_source_version(
+    source_id: int,
+    version_id: int,
+    confirm_restore: bool = False,
+) -> Any:
+    """Restore one source version after explicit confirmation; creates a new snapshot."""
+    if not confirm_restore:
+        return {
+            "error": True,
+            "status": 400,
+            "body": {
+                "message": (
+                    "Restoring a source version overwrites the current draft. Re-call with "
+                    "confirm_restore=true after explicit user approval."
+                ),
+            },
+        }
+    return _post(
+        f"/api/agent/v1/strategy-sources/{int(source_id)}/versions/{int(version_id)}/restore",
+        json={"confirm": True},
+    )
+
+
 # Backtests
 
 
@@ -494,6 +689,23 @@ def list_paper_orders() -> Any:
     return _get("/api/agent/v1/portfolio/paper-orders")
 
 
+@mcp.tool()
+def cancel_open_paper_orders(confirm_cancel: bool = False) -> Any:
+    """Cancel all open agent paper orders for this tenant (scope T)."""
+    if not confirm_cancel:
+        return {
+            "error": True,
+            "status": 400,
+            "body": {
+                "message": (
+                    "Cancelling open paper orders changes account state. Re-call with "
+                    "confirm_cancel=true after explicit user approval."
+                ),
+            },
+        }
+    return _post("/api/agent/v1/quick-trade/kill-switch")
+
+
 _TRANSPORTS = {"stdio", "sse", "streamable-http"}
 
 
@@ -532,11 +744,48 @@ def _apply_http_settings_from_env() -> None:
             )
 
 
+def _validate_network_security(transport: str) -> None:
+    if transport == "stdio":
+        return
+    host = str(getattr(getattr(mcp, "settings", None), "host", MCP_HOST) or "").strip().lower()
+    loopback = host in {"127.0.0.1", "localhost", "::1", "[::1]"}
+    if MCP_AUTH_TOKEN:
+        if len(MCP_AUTH_TOKEN) < 32:
+            print(
+                "[quantdinger-mcp] QUANTDINGER_MCP_AUTH_TOKEN must be at least 32 characters.",
+                file=sys.stderr,
+            )
+            sys.exit(2)
+        if secrets.compare_digest(MCP_AUTH_TOKEN, AGENT_TOKEN):
+            print(
+                "[quantdinger-mcp] inbound MCP auth token must differ from the Agent Gateway token.",
+                file=sys.stderr,
+            )
+            sys.exit(2)
+        return
+    if loopback:
+        return
+    if _truthy_env("QUANTDINGER_MCP_ALLOW_INSECURE_HTTP"):
+        print(
+            "[quantdinger-mcp] WARNING: unauthenticated MCP HTTP is enabled on a non-loopback host.",
+            file=sys.stderr,
+        )
+        return
+    print(
+        "[quantdinger-mcp] refusing unauthenticated MCP HTTP on a non-loopback host. "
+        "Set QUANTDINGER_MCP_AUTH_TOKEN or explicitly set "
+        "QUANTDINGER_MCP_ALLOW_INSECURE_HTTP=true behind a trusted private proxy.",
+        file=sys.stderr,
+    )
+    sys.exit(2)
+
+
 def main() -> None:
     """Entrypoint."""
     transport = _resolve_transport()
     if transport in ("sse", "streamable-http"):
         _apply_http_settings_from_env()
+        _validate_network_security(transport)
     mcp.run(transport=transport)
 
 

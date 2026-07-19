@@ -36,6 +36,9 @@ def _robot_payload(executor_type: str, **overrides):
         "layer_count": 3,
         "orders_per_layer": 2,
         "take_profit_pct": 0.02,
+        "trailing_take_profit_enabled": True,
+        "trailing_activation_pct": 0.01,
+        "trailing_callback_pct": 0.003,
         "hard_stop_pct": 0.1,
     }
     payload.update(overrides)
@@ -60,6 +63,9 @@ def test_executor_templates_expose_only_supported_robot_types():
         assert defaults["dynamic_anchor"] is True
         assert "initial_capital" not in defaults
         assert "leverage" not in defaults
+        if item["executor_type"] in {"dca", "martingale", "layered_martingale"}:
+            assert defaults["trailing_take_profit_enabled"] is True
+            assert 0 < defaults["trailing_callback_pct"] < defaults["trailing_activation_pct"]
 
 
 @pytest.mark.parametrize("executor_type", ["grid", "dca", "martingale", "layered_martingale"])
@@ -126,6 +132,88 @@ def test_every_robot_runs_in_backtest_and_live_v2_engines(executor_type):
     assert result["totalExecutions"] >= 1
     assert intents
     assert all(abs(float(intent.value)) <= 1000 for intent in intents)
+
+
+@pytest.mark.parametrize("executor_type", ["dca", "martingale", "layered_martingale"])
+def test_robot_trailing_take_profit_activates_and_closes_after_pullback(executor_type):
+    payload = build_executor_strategy_payload(_robot_payload(executor_type), user_id=7)
+    instrument = "Crypto:BTC/USDT@swap"
+    frame = _runtime_frame().iloc[:2]
+    session = StrategyV2LiveSession(
+        code=payload["code"],
+        frames={instrument: frame},
+        initial_capital=1000,
+    )
+
+    intents, _, _ = session.process({instrument: frame})
+
+    assert intents
+    assert "TAKE_PROFIT = 0.0" in payload["code"]
+    assert "trailing_stop_pct=TRAILING_CALLBACK" in payload["code"]
+    assert intents[0].protection is not None
+    assert intents[0].protection.take_profit_pct == 0
+    assert intents[0].protection.trailing_activation_pct == pytest.approx(0.01)
+    assert intents[0].protection.trailing_stop_pct == pytest.approx(0.003)
+
+    session.synchronize_positions({
+        instrument: {"side": "long", "amount": 1, "avg_cost": 100, "last_price": 100}
+    })
+    assert session.evaluate_protections(
+        {instrument: 102},
+        timestamp="2026-01-01 01:00:00",
+    ) == []
+    restored = StrategyV2LiveSession(
+        code=payload["code"],
+        frames={instrument: frame},
+        initial_capital=1000,
+    )
+    restored.restore_protection_snapshot(session.protection_snapshot())
+    restored.synchronize_positions({
+        instrument: {"side": "long", "amount": 1, "avg_cost": 100, "last_price": 102}
+    })
+    exits = restored.evaluate_protections(
+        {instrument: 101.5},
+        timestamp="2026-01-01 01:00:01",
+    )
+
+    assert len(exits) == 1
+    assert exits[0].kind == "target_quantity"
+    assert exits[0].value == 0
+    assert exits[0].reason == "trailing_stop"
+
+
+@pytest.mark.parametrize("executor_type", ["dca", "martingale", "layered_martingale"])
+def test_robot_can_disable_trailing_take_profit_and_keep_fixed_take_profit(executor_type):
+    payload = build_executor_strategy_payload(
+        _robot_payload(executor_type, trailing_take_profit_enabled=False),
+        user_id=7,
+    )
+    instrument = "Crypto:BTC/USDT@swap"
+    frame = _runtime_frame().iloc[:2]
+    session = StrategyV2LiveSession(
+        code=payload["code"],
+        frames={instrument: frame},
+        initial_capital=1000,
+    )
+
+    intents, _, _ = session.process({instrument: frame})
+
+    assert "TAKE_PROFIT = 0.02" in payload["code"]
+    assert intents[0].protection is not None
+    assert intents[0].protection.take_profit_pct == pytest.approx(0.02)
+    assert intents[0].protection.trailing_stop_pct == 0
+    assert intents[0].protection.trailing_activation_pct == 0
+
+
+@pytest.mark.parametrize("executor_type", ["dca", "martingale", "layered_martingale"])
+def test_robot_preview_rejects_invalid_trailing_take_profit(executor_type):
+    preview = preview_executor(_robot_payload(
+        executor_type,
+        trailing_activation_pct=0.002,
+        trailing_callback_pct=0.003,
+    ))
+
+    assert "invalid_trailing_take_profit" in preview["warnings"]
 
 
 def test_robot_preview_keeps_each_algorithm_shape():
@@ -226,6 +314,48 @@ def test_spot_robot_is_forced_to_long_and_cannot_enable_leverage():
     assert "DIRECTION = 1.0" in payload["code"]
 
 
-def test_neutral_grid_is_rejected_until_v2_supports_hedged_positions():
-    with pytest.raises(ValueError, match="V2_GRID_NEUTRAL_UNSUPPORTED"):
-        build_executor_strategy_payload(_robot_payload("grid", side="neutral"), user_id=7)
+def test_neutral_grid_generates_dual_leg_v2_and_resting_live_config():
+    payload = build_executor_strategy_payload(
+        _robot_payload("grid", side="neutral", dynamic_anchor=False),
+        user_id=7,
+    )
+
+    assert payload["trade_direction"] == "neutral"
+    assert payload["compatibility"]["sides"] == ["long", "short", "neutral"]
+    assert payload["trading_config"]["bot_type"] == "grid"
+    assert payload["trading_config"]["bot_params"]["gridDirection"] == "neutral"
+    assert payload["trading_config"]["bot_params"]["initialPositionPct"] == 0
+    assert 'position_side="long"' in payload["code"]
+    assert 'position_side="short"' in payload["code"]
+
+    instrument = "Crypto:BTC/USDT@swap"
+    index = pd.date_range("2026-01-01", periods=3, freq="15min")
+    frame = pd.DataFrame({
+        "open": [100.0, 100.0, 100.0],
+        "high": [111.0, 111.0, 111.0],
+        "low": [89.0, 89.0, 89.0],
+        "close": [100.0, 100.0, 100.0],
+        "volume": [100000.0, 100000.0, 100000.0],
+    }, index=index)
+    session = StrategyV2LiveSession(
+        code=payload["code"],
+        frames={instrument: frame.iloc[:2]},
+        initial_capital=1000,
+    )
+    intents, _, _ = session.process({instrument: frame.iloc[:2]})
+
+    assert {intent.position_side for intent in intents} == {"long", "short"}
+    assert any(intent.position_side == "long" and intent.value > 0 for intent in intents)
+    assert any(intent.position_side == "short" and intent.value < 0 for intent in intents)
+
+    result = StrategyV2BacktestRunner(
+        code=payload["code"],
+        frames={instrument: frame},
+        initial_capital=1000,
+        commission=0,
+        slippage=0,
+        leverage_enabled=True,
+        leverage=3,
+    ).run()
+    assert {row["position_side"] for row in result["executions"]} == {"long", "short"}
+    assert result["audit"]["passed"] is True

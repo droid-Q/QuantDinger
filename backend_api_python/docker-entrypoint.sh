@@ -104,6 +104,15 @@ fi
 # long enough to initialize bind-mounted secrets and volume ownership.
 if [ "$(id -u)" = "0" ] && id quantdinger >/dev/null 2>&1; then
     chown -R quantdinger:quantdinger /app/logs /app/data 2>/dev/null || true
+    if [ -f /app/.env ]; then
+        if chown quantdinger:quantdinger /app/.env 2>/dev/null; then
+            chmod 600 /app/.env 2>/dev/null || \
+                echo "[WARNING] Could not restrict /app/.env permissions to mode 600."
+        else
+            echo "[WARNING] Could not grant the runtime user ownership of /app/.env."
+            echo "[TIP] System settings will be read-only until /app/.env is writable by UID 10001."
+        fi
+    fi
     exec gosu quantdinger "$@"
 fi
 

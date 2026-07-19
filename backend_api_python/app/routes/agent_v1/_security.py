@@ -4,7 +4,8 @@ from __future__ import annotations
 from typing import Any, Mapping, MutableMapping
 
 # Upper bound for indicator Python source accepted via agent/MCP paths.
-MAX_INDICATOR_CODE_BYTES = 512 * 1024
+MAX_SOURCE_CODE_BYTES = 512 * 1024
+MAX_INDICATOR_CODE_BYTES = MAX_SOURCE_CODE_BYTES
 
 # Keys stripped or masked anywhere in agent-facing JSON.
 _SECRET_KEYS = frozenset({
@@ -22,6 +23,13 @@ def assert_indicator_code_size(code: str) -> None:
     if indicator_code_too_large(code):
         raise ValueError(
             f"Indicator code exceeds {MAX_INDICATOR_CODE_BYTES // 1024} KiB limit"
+        )
+
+
+def assert_strategy_code_size(code: str) -> None:
+    if len((code or "").encode("utf-8")) > MAX_SOURCE_CODE_BYTES:
+        raise ValueError(
+            f"Strategy code exceeds {MAX_SOURCE_CODE_BYTES // 1024} KiB limit"
         )
 
 
