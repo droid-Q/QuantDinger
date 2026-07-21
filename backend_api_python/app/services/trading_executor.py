@@ -33,6 +33,7 @@ from app.services.strategy_script_runtime import (
     StrategyScriptContext,
     compile_strategy_script_handlers,
 )
+from app.services.live_trading.records import normalize_strategy_symbol
 from app.utils.safe_exec import TimeoutError as SafeExecTimeoutError, timeout_context
 
 logger = get_logger(__name__)
@@ -346,7 +347,8 @@ class TradingExecutor:
 
     @staticmethod
     def _symbol_match_key(symbol: str) -> str:
-        return str(symbol or "").split(":")[0].strip()
+        raw = str(symbol or "").split(":", 1)[0].strip()
+        return normalize_strategy_symbol(raw)
 
     def _inflight_open_side(self, strategy_id: int, symbol: str) -> Optional[str]:
         """
@@ -4287,6 +4289,9 @@ class TradingExecutor:
     def _get_current_positions(self, strategy_id: int, symbol: str) -> List[Dict[str, Any]]:
         """Load current local positions for a strategy and symbol."""
         try:
+            symbol_key = self._symbol_match_key(symbol)
+            if not symbol_key:
+                return []
             with get_db_connection() as db:
                 cursor = db.cursor()
                 query = """
@@ -4299,7 +4304,7 @@ class TradingExecutor:
                 
                 matched_positions = []
                 for pos in all_positions:
-                    if pos['symbol'].split(':')[0] == symbol.split(':')[0]:
+                    if self._symbol_match_key(pos.get('symbol')) == symbol_key:
                         matched_positions.append(pos)
                 
                 cursor.close()
@@ -4319,7 +4324,7 @@ class TradingExecutor:
         side_norm = (side or "").strip().lower()
         if side_norm not in ("long", "short"):
             return 0.0
-        sym_key = str(symbol or "").split(":")[0].strip()
+        sym_key = self._symbol_match_key(symbol)
         try:
             with get_db_connection() as db:
                 cursor = db.cursor()
@@ -4340,7 +4345,7 @@ class TradingExecutor:
 
         qty = 0.0
         for row in rows:
-            row_symbol = str((row or {}).get("symbol") or "").split(":")[0].strip()
+            row_symbol = self._symbol_match_key((row or {}).get("symbol"))
             if row_symbol != sym_key:
                 continue
             typ = str((row or {}).get("type") or "").strip().lower()
@@ -5613,7 +5618,7 @@ class TradingExecutor:
             except Exception:
                 positions = []
 
-        normalized_symbol = (symbol or "").split(':')[0]
+        normalized_symbol = self._symbol_match_key(symbol)
         for pos in positions:
             try:
                 side = str(pos.get('side') or '').strip().lower()
@@ -5624,7 +5629,7 @@ class TradingExecutor:
 
                 mark_price = pos.get('current_price')
                 pos_symbol = str(pos.get('symbol') or '')
-                if current_price and normalized_symbol and pos_symbol.split(':')[0] == normalized_symbol:
+                if current_price and normalized_symbol and self._symbol_match_key(pos_symbol) == normalized_symbol:
                     mark_price = current_price
                 mark_price = float(mark_price or 0.0)
                 if mark_price <= 0:
@@ -5798,9 +5803,20 @@ class TradingExecutor:
     def _update_positions(self, strategy_id: int, symbol: str, current_price: float):
         """Update current price on local position rows for a symbol."""
         try:
+            raw_symbol = str(symbol or "").split(":", 1)[0].strip()
+            symbol_key = self._symbol_match_key(raw_symbol)
+            if not symbol_key:
+                return
             with get_db_connection() as db:
                 cursor = db.cursor()
-                cursor.execute("UPDATE qd_strategy_positions SET current_price = %s WHERE strategy_id = %s AND symbol = %s", (current_price, strategy_id, symbol))
+                cursor.execute(
+                    """
+                    UPDATE qd_strategy_positions
+                    SET current_price = %s
+                    WHERE strategy_id = %s AND symbol IN (%s, %s)
+                    """,
+                    (current_price, strategy_id, raw_symbol, symbol_key),
+                )
                 db.commit()
                 cursor.close()
         except Exception:

@@ -230,31 +230,23 @@ def get_positions():
         }
         if execution_mode == "live":
             try:
-                from app.services.exchange_execution import resolve_exchange_config
                 from app.services.live_trading.account_positions import (
-                    list_account_positions,
+                    live_account_mirror_for_strategy,
                     reconcile_strategy_vs_account,
                 )
-                from app.services.live_trading.leg_context import credential_id_from_exchange_config
 
-                resolved_ex = resolve_exchange_config(exchange_config, user_id=int(user_id or 1))
-                cred_id = int(
-                    credential_id_from_exchange_config(resolved_ex)
-                    or credential_id_from_exchange_config(exchange_config)
-                    or 0
-                )
-                account_rows = list_account_positions(
+                mirror = live_account_mirror_for_strategy(
+                    strategy_id=int(strategy_id),
                     user_id=int(user_id),
-                    credential_id=cred_id if cred_id > 0 else None,
-                    market_type=market_type,
+                    strategy_market_type=market_type,
+                    allowed_symbols=allowed,
                 )
-                if allowed:
-                    account_rows = [
-                        r for r in account_rows
-                        if normalize_strategy_symbol(str(r.get("symbol") or "")).upper() in allowed_upper
-                    ]
+                account_rows = mirror.get("reconcile_legs") or []
                 account_reconciliation = reconcile_strategy_vs_account(out, account_rows)
                 account_reconciliation["account_positions"] = account_rows
+                account_reconciliation["fetched_at"] = int(mirror.get("fetched_at") or 0)
+                account_reconciliation["warnings"] = list(mirror.get("warnings") or [])
+                account_reconciliation["source"] = str(mirror.get("source") or "live_snapshot")
             except Exception as e:
                 account_reconciliation = {
                     "status": "error",
@@ -326,5 +318,4 @@ def get_positions():
         logger.error(f"get_positions failed: {str(e)}")
         logger.error(traceback.format_exc())
         return jsonify({'code': 0, 'msg': str(e), 'data': {'positions': [], 'items': []}}), 500
-
 

@@ -163,8 +163,10 @@ def _parse_swap_position_items(items: List[Dict[str, Any]], *, market_type: str 
             entry = float(
                 item.get("avgPx")
                 or item.get("entryPrice")
+                or item.get("entry_price")
                 or item.get("openPriceAvg")
                 or item.get("avgEntryPrice")
+                or item.get("price")
                 or 0.0
             )
         except (TypeError, ValueError):
@@ -544,6 +546,15 @@ def fetch_account_snapshot(*, user_id: int, credential_id: int) -> Dict[str, Any
         swap_all.extend(sp)
         spot_all.extend(st)
         orders_all.extend(od)
+    elif exchange_id in ("mt5", "cptmarkets", "cpt_markets"):
+        try:
+            client = create_client(exchange_config, market_type="spot")
+            rows = client.get_positions() or []
+            spot_all.extend(
+                _parse_swap_position_items(rows if isinstance(rows, list) else [], market_type="spot")
+            )
+        except Exception as e:
+            _append_snapshot_error(errors, e, context=f"{exchange_id.upper()} 持仓")
     else:
         try:
             client = create_client(exchange_config, market_type="swap")
