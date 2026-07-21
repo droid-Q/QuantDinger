@@ -62,8 +62,69 @@ def fetch_position_size_for_side(strategy_id: int, symbol: str, side: str) -> fl
         return 0.0
     try:
         return max(0.0, float(row.get("size") or 0.0))
-    except Exception:
+    except (TypeError, ValueError):
         return 0.0
+
+
+def fetch_allocated_position_size(
+    *,
+    strategy_id: int,
+    credential_id: int,
+    market_type: str,
+    symbol: str,
+    side: str,
+) -> float:
+    """Return the aggregate L3 allocation for one account instrument leg."""
+    sid = int(strategy_id or 0)
+    cred = int(credential_id or 0)
+    side_l = str(side or "").strip().lower()
+    mt = str(market_type or "swap").strip().lower()
+    if mt in ("futures", "future", "perp", "perpetual"):
+        mt = "swap"
+    if side_l not in ("long", "short"):
+        return 0.0
+
+    clauses = ["side = %s", "market_type = %s", "size > 0"]
+    params: List[Any] = [side_l, mt]
+    if cred > 0 and sid > 0:
+        clauses.append("(credential_id = %s OR strategy_id = %s)")
+        params.extend([cred, sid])
+    elif cred > 0:
+        clauses.append("credential_id = %s")
+        params.append(cred)
+    elif sid > 0:
+        clauses.append("strategy_id = %s")
+        params.append(sid)
+    else:
+        return 0.0
+
+    with get_db_connection() as db:
+        cur = db.cursor()
+        cur.execute(
+            f"""
+            SELECT strategy_id, symbol, symbol_canonical, size
+            FROM qd_strategy_positions
+            WHERE {' AND '.join(clauses)}
+            """,
+            params,
+        )
+        rows = cur.fetchall() or []
+        cur.close()
+
+    wanted = normalize_strategy_symbol(symbol)
+    total = 0.0
+    for raw in rows:
+        row = dict(raw)
+        row_symbol = normalize_strategy_symbol(
+            str(row.get("symbol_canonical") or row.get("symbol") or "")
+        )
+        if row_symbol != wanted:
+            continue
+        try:
+            total += max(0.0, float(row.get("size") or 0.0))
+        except Exception:
+            continue
+    return total
 
 
 def strategy_has_trades_for_symbol(strategy_id: int, symbol: str) -> bool:
@@ -119,19 +180,24 @@ def strategy_allowed_symbols(strategy_config: Dict[str, Any]) -> Set[str]:
         trading_config = {}
 
     for raw in (strategy_config.get("symbol"), trading_config.get("symbol")):
-        norm = normalize_strategy_symbol(str(raw or "").strip())
+        text = str(raw or "").strip()
+        if text.lower().startswith(("basket:", "universe:")):
+            continue
+        norm = normalize_strategy_symbol(text)
         if norm:
             allowed.add(norm.upper())
 
-    for sym in trading_config.get("symbol_list") or []:
-        if not sym or not isinstance(sym, str):
-            continue
-        bare = sym.strip()
-        if ":" in bare:
-            bare = bare.split(":", 1)[-1]
-        norm = normalize_strategy_symbol(bare)
-        if norm:
-            allowed.add(norm.upper())
+    manifest = trading_config.get("strategy_manifest") or trading_config.get("strategyManifest") or {}
+    if isinstance(manifest, dict):
+        universe = manifest.get("universe") or {}
+        instruments = universe.get("instruments") or [] if isinstance(universe, dict) else []
+        for instrument in instruments:
+            if not isinstance(instrument, dict):
+                continue
+            norm = normalize_strategy_symbol(str(instrument.get("symbol") or "").strip())
+            if norm:
+                allowed.add(norm.upper())
+
     return allowed
 
 
@@ -314,6 +380,7 @@ def ensure_position_ledger_schema() -> None:
         "ALTER TABLE qd_strategy_trades ADD COLUMN IF NOT EXISTS pending_order_id INTEGER DEFAULT 0",
         "ALTER TABLE qd_strategy_trades ADD COLUMN IF NOT EXISTS strategy_run_id INTEGER DEFAULT 0",
         "ALTER TABLE qd_strategy_trades ADD COLUMN IF NOT EXISTS order_intent_id INTEGER DEFAULT 0",
+        "ALTER TABLE qd_strategy_trades ADD COLUMN IF NOT EXISTS commission_quote DECIMAL(24,8)",
         "ALTER TABLE qd_strategy_positions ADD COLUMN IF NOT EXISTS market_type VARCHAR(20) DEFAULT 'swap'",
         "ALTER TABLE qd_strategy_positions ADD COLUMN IF NOT EXISTS credential_id INTEGER DEFAULT 0",
         "ALTER TABLE qd_strategy_positions ADD COLUMN IF NOT EXISTS inst_id VARCHAR(80) DEFAULT ''",
@@ -367,6 +434,7 @@ def record_trade(
     amount: float,
     commission: float = 0.0,
     commission_ccy: str = "",
+    commission_quote: Optional[float] = None,
     profit: Optional[float] = None,
     close_reason: str = "",
     user_id: int = None,
@@ -408,12 +476,12 @@ def record_trade(
             """
             INSERT INTO qd_strategy_trades
             (user_id, strategy_id, symbol, symbol_canonical, type, price, amount, value, commission,
-             commission_ccy, profit, close_reason,
+             commission_ccy, commission_quote, profit, close_reason,
              matched_entry_price, grid_matched_profit,
              market_type, credential_id, inst_id, fill_source, pending_order_id,
              strategy_run_id, order_intent_id, created_at)
             VALUES
-            (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, NOW())
+            (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, NOW())
             """,
             (
                 int(user_id),
@@ -426,6 +494,7 @@ def record_trade(
                 float(value),
                 float(commission or 0.0),
                 str(commission_ccy or ""),
+                float(commission_quote) if commission_quote is not None else None,
                 profit,
                 str(close_reason or "").strip(),
                 float(matched_entry_price) if matched_entry_price is not None else 0.0,

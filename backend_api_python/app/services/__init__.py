@@ -1,25 +1,24 @@
-"""
-业务服务层
-"""
-from app.services.kline import KlineService
-from app.services.backtest import BacktestService
-from app.services.strategy_compiler import StrategyCompiler
-from app.services.fast_analysis import FastAnalysisService
-from app.services.experiment import (
-    ExperimentRunnerService,
-    MarketRegimeService,
-    StrategyEvolutionService,
-    StrategyScoringService,
-)
+"""Lazy application service exports."""
 
-__all__ = [
-    'KlineService',
-    'BacktestService',
-    'StrategyCompiler',
-    'FastAnalysisService',
-    'ExperimentRunnerService',
-    'MarketRegimeService',
-    'StrategyEvolutionService',
-    'StrategyScoringService',
-]
+from __future__ import annotations
 
+from importlib import import_module
+from typing import Any
+
+
+_EXPORTS = {
+    "KlineService": ("app.services.kline", "KlineService"),
+    "FastAnalysisService": ("app.services.fast_analysis", "FastAnalysisService"),
+}
+
+__all__ = list(_EXPORTS)
+
+
+def __getattr__(name: str) -> Any:
+    target = _EXPORTS.get(name)
+    if target is None:
+        raise AttributeError(name)
+    module_name, attribute = target
+    value = getattr(import_module(module_name), attribute)
+    globals()[name] = value
+    return value

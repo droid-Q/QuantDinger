@@ -1,306 +1,102 @@
-# QuantDinger MCP server
+# QuantDinger MCP Server
 
-[![PyPI](https://img.shields.io/pypi/v/quantdinger-mcp?style=flat-square&logo=pypi&logoColor=white)](https://pypi.org/project/quantdinger-mcp/)
-[![Python](https://img.shields.io/pypi/pyversions/quantdinger-mcp?style=flat-square&logo=python&logoColor=white)](https://pypi.org/project/quantdinger-mcp/)
-[![License](https://img.shields.io/badge/License-Apache%202.0-blue.svg?style=flat-square)](../LICENSE)
+The MCP server is a thin, tenant-scoped wrapper over `/api/agent/v1`. It exposes market data, chart-indicator authoring, Strategy API V2 deployment and backtesting, bounded job polling, runtime controls, and explicitly confirmed quick orders.
 
-Thin Model Context Protocol server that exposes a curated subset of the
-QuantDinger Agent Gateway (`/api/agent/v1`) as MCP tools, so AI clients
-that support MCP (Cursor, Claude-style desktop apps, OpenClaw, NanoBot, etc.)
-can drive QuantDinger without writing custom HTTP code.
-
-This package is an **additive** integration. The Agent Gateway REST API
-remains the source of truth.
-
-## Security model
-
-- **Order placement is explicit and server-gated.** `place_quick_order`
-  requires `T` scope and `confirm_order=true`. If the token is live-capable
-  (`paper_only=false`), the MCP call also requires `confirm_live_trading=true`,
-  and the backend still requires `AGENT_LIVE_TRADING_ENABLED=true`.
-- **Runtime stop is allowed, gated, and explicit.** MCP can read the runtime
-  overview and stop a tenant-owned strategy, but stopping requires `T` scope
-  and `confirm_stop=true`.
-- **Scope gating stays on the server.** The MCP layer forwards your agent
-  token; it cannot bypass allowlists or scopes.
-- **Defense in depth:** MCP redacts known credential fields (`api_key`,
-  `secret`, `passphrase`, …) in JSON responses. The Gateway also redacts
-  strategy rows before returning them to agents.
-- **Bounded long jobs:** `stream_job_until_done` caps event count and duration;
-  `wait_for_job` caps poll time. Tune via env vars below.
-- **LLM cost guard:** `submit_ai_optimize` requires `confirm_llm_usage=true`.
-- **Payload limits:** indicator Python source is capped at **512 KiB** on
-  both Gateway and MCP client.
-
-## What it exposes
-
-Read-class (R), Workspace write (W), Backtest-class (B), and explicit
-Trading-class (T) tools.
-
-| Tool | Class | Purpose |
-|------|-------|---------|
-| `whoami` | R | Inspect the calling token |
-| `check_health` | — | Public liveness (no token) |
-| `list_markets` | R | Markets the token may query |
-| `search_symbols` | R | Symbols within a market |
-| `get_klines` | R | OHLCV bars |
-| `get_price` | R | Latest price |
-| `list_strategies` | R | Tenant's strategies (compact) |
-| `get_strategy` | R | One strategy (secrets redacted) |
-| `runtime_overview` | R | Running strategy / position / pending-order overview |
-| `stop_strategy` | T | Stop a tenant-owned strategy (`confirm_stop=true`) |
-| `place_quick_order` | T | Place paper/live quick order (`confirm_order=true`) |
-| `list_jobs` | R | Recent async jobs |
-| `get_job` | R | Poll one job |
-| `wait_for_job` | R | Poll until terminal or timeout |
-| `stream_job_until_done` | R | Bounded SSE consumer |
-| `get_indicator_authoring_contract` | R | Indicator I/O contract + starter template |
-| `validate_indicator_code` | R | Sandbox validate without save |
-| `save_indicator` | W | Persist to indicator library |
-| `list_indicators` | R | Tenant indicator list |
-| `get_indicator` | R | One indicator with code |
-| `create_strategy` | W | Create stopped strategy (+ auto-save indicator) |
-| `update_strategy` | W | Patch strategy fields (blocks `status=running`) |
-| `submit_backtest` | B | Queue a backtest (`strict_mode`, `strategy_config`, `indicator_params`) |
-| `regime_detect` | B | Synchronous regime detection |
-| `submit_experiment_pipeline` | B | Queue legacy grid pipeline |
-| `submit_structured_tune` | B | Queue grid/random tuning |
-| `submit_ai_optimize` | B | Queue LLM optimization (requires confirm flag) |
-| `list_portfolio_positions` | R | Manual portfolio positions |
-| `list_paper_orders` | R | Recent paper orders |
-
-## Install
-
-From PyPI (recommended — works on any machine without cloning the repo):
+## Install and run
 
 ```bash
-pipx install quantdinger-mcp
-# or, no install at all (cached on first run):
-uvx quantdinger-mcp
-# or, into a venv:
-pip install quantdinger-mcp
-```
-
-Editable install for hacking on the server itself:
-
-```bash
-cd mcp_server
-pip install -e .
-```
-
-## Run
-
-Configuration is env-only so the same binary works in desktop and cloud.
-
-| Variable | Required | Purpose |
-|----------|----------|---------|
-| `QUANTDINGER_BASE_URL`     | yes | e.g. `http://localhost:8888` |
-| `QUANTDINGER_AGENT_TOKEN`  | yes | a token issued via `/api/agent/v1/admin/tokens` |
-| `QUANTDINGER_MCP_TRANSPORT`| no  | `stdio` (default), `sse`, or `streamable-http` |
-| `QUANTDINGER_MCP_HOST`     | no  | bind host for HTTP transports (default `127.0.0.1`) |
-| `QUANTDINGER_MCP_PORT`     | no  | bind port for HTTP transports (default `8000`) |
-| `QUANTDINGER_TIMEOUT_S`    | no  | upstream HTTP timeout (default `60`) |
-| `QUANTDINGER_MCP_JOB_STREAM_MAX_EVENTS` | no | SSE cap (default `200`) |
-| `QUANTDINGER_MCP_JOB_STREAM_MAX_SECONDS` | no | SSE time cap (default `300`) |
-| `QUANTDINGER_MCP_JOB_POLL_MAX_SECONDS` | no | `wait_for_job` cap (default `300`) |
-
-### stdio (desktop IDEs)
-
-```bash
-QUANTDINGER_BASE_URL=http://localhost:8888 \
-QUANTDINGER_AGENT_TOKEN=qd_agent_xxxxx \
+pip install "quantdinger-mcp==0.4.0"
+export QUANTDINGER_BASE_URL=http://localhost:8888
+export QUANTDINGER_AGENT_TOKEN=qd_agent_xxx
 quantdinger-mcp
 ```
 
-### SSE / Streamable HTTP (cloud agents, remote IDEs)
+`pipx install quantdinger-mcp` and `uvx quantdinger-mcp` are also supported. Use `pip install -e ./mcp_server` only when developing from a repository checkout.
+
+The default transport is `stdio`. Set `QUANTDINGER_MCP_TRANSPORT` to `sse` or `streamable-http` for a network transport. Optional limits include `QUANTDINGER_TIMEOUT_S`, `QUANTDINGER_MCP_JOB_STREAM_MAX_EVENTS`, `QUANTDINGER_MCP_JOB_STREAM_MAX_SECONDS`, and `QUANTDINGER_MCP_JOB_POLL_MAX_SECONDS`.
+
+Network transports bound to a non-loopback host require a separate inbound bearer token. This token authenticates MCP clients and must not be the Agent Gateway token:
 
 ```bash
-QUANTDINGER_BASE_URL=http://localhost:8888 \
-QUANTDINGER_AGENT_TOKEN=qd_agent_xxxxx \
-QUANTDINGER_MCP_TRANSPORT=streamable-http \
-QUANTDINGER_MCP_HOST=0.0.0.0 \
-QUANTDINGER_MCP_PORT=7800 \
+export QUANTDINGER_MCP_TRANSPORT=streamable-http
+export QUANTDINGER_MCP_HOST=0.0.0.0
+export QUANTDINGER_MCP_PORT=7800
+export QUANTDINGER_MCP_PUBLIC_URL=https://mcp.example.com
+export QUANTDINGER_MCP_AUTH_TOKEN=replace-with-a-random-32-plus-character-secret
 quantdinger-mcp
 ```
 
-The server is then reachable at `http://<host>:7800/`. Use `sse` instead of
-`streamable-http` for clients that only support the older SSE transport.
+Clients must send `Authorization: Bearer <QUANTDINGER_MCP_AUTH_TOKEN>` to `/mcp` or `/sse`. For a private ingress that already authenticates every request, `QUANTDINGER_MCP_ALLOW_INSECURE_HTTP=true` is an explicit escape hatch; never use it on a directly reachable public listener.
 
-## Wire into a client
+Docker builds use the official PyPI index by default. In regions where it is slow, override it without editing the image definition: `docker build --build-arg PIP_INDEX_URL=https://your-mirror.example/simple .`.
 
-### Local stdio client config
+Never place an agent token in prompts, logs, screenshots, source control, or MCP configuration that will be shared. Responses redact credential fields, and clients must not attempt to recover them.
 
-```json
-{
-  "mcpServers": {
-    "quantdinger": {
-      "command": "quantdinger-mcp",
-      "env": {
-        "QUANTDINGER_BASE_URL": "http://localhost:8888",
-        "QUANTDINGER_AGENT_TOKEN": "qd_agent_xxxxxxxx"
-      }
-    }
-  }
-}
-```
+## Tool surface
 
-### Remote HTTP client config
+| Tool group | Scope | Purpose |
+|---|---:|---|
+| `whoami`, `check_health` | R/public | Identity, allowlists, and liveness |
+| `list_markets`, `search_symbols`, `get_klines`, `get_price` | R | Market discovery and data |
+| `get_indicator_authoring_contract`, `validate_indicator_code`, `save_indicator`, `list_indicators`, `get_indicator` | R/W | Chart-only indicators |
+| `list_strategy_templates`, `compile_strategy_code` | R | Strategy API V2 templates and manifest compilation |
+| `list_strategy_sources`, `get_strategy_source`, `save_strategy_source` | R/W | Private Strategy API V2 source library |
+| `list_strategy_source_versions`, `restore_strategy_source_version` | R/W | Source history and explicitly confirmed restore |
+| `create_strategy`, `update_strategy`, `list_strategies`, `get_strategy` | R/W | Strategy API V2 deployments |
+| `submit_backtest` | B | Strategy API V2 backtest job |
+| `list_jobs`, `get_job`, `wait_for_job`, `stream_job_until_done` | R | Bounded async-job access |
+| `runtime_overview`, `stop_strategy` | R/T | Runtime inspection and confirmed stop |
+| `place_quick_order` | T | Explicitly confirmed quick order |
+| `list_portfolio_positions`, `list_paper_orders` | R | Portfolio and paper-order reads |
+| `cancel_open_paper_orders` | T | Explicitly confirmed paper-order kill switch |
 
-For clients that connect to an MCP server over HTTP/SSE rather than spawning
-a subprocess, point them at the URL the server is bound to (e.g.
-`http://your-host:7800`) and let the client handle protocol negotiation.
+`stop_strategy` requires `confirm_stop=true`. `place_quick_order` requires `confirm_order=true`; a live-capable token also requires `confirm_live_trading=true`. Optional `tp_price` and `sl_price` protection are forwarded to the shared Quick Trade execution path. Server-side trading flags and token allowlists still apply; a live-capable token receives an error instead of silently falling back to paper when live trading is disabled.
 
-Never put production exchange keys or admin JWTs in the MCP config — only
-agent tokens, scoped to the capabilities the client actually needs.
+## Strategy API V2 workflow
 
-Recommended scopes:
+Executable strategy code must define `initialize(context)` and declare its universe and subscriptions. It must provide `handle_data`, `on_rebalance`, or a scheduled callback. The manifest owns instruments, markets, frequencies, factor dependencies, warmup, and leverage policy.
 
-- Indicator authoring and backtesting: **R + W + B**
-- Runtime overview only: **R**
-- Runtime stop from MCP: **R + T** (and call `stop_strategy` with `confirm_stop=true`)
-- Quick order placement: **R + T**. Paper orders work with paper-only tokens;
-  live orders additionally require `paper_only=false`, `confirm_live_trading=true`,
-  and `AGENT_LIVE_TRADING_ENABLED=true` on the backend.
-
-## Common tool calls
-
-MCP clients usually let you ask in natural language, but the examples below
-show the exact tool names and required confirmation flags.
-
-### Check connection and token
-
-Ask your MCP client:
+Compile and save a source before creating a stopped deployment:
 
 ```text
-Use the QuantDinger MCP tool `whoami` and tell me the token scopes, paper_only
-status, and allowed markets.
+compile_strategy_code(code="...Strategy API V2 Python...")
+save_strategy_source(name="btc-momentum", code="...Strategy API V2 Python...")
 ```
 
-Useful tools:
-
-- `check_health` - verify the backend is reachable.
-- `whoami` - inspect scopes, allowlists, and whether the token is paper-only.
-- `list_markets` - list markets allowed by the token.
-
-### Read markets
+Use the returned source id:
 
 ```text
-Use `search_symbols` to search Crypto symbols matching BTC, then use
-`get_klines` to fetch 300 1H candles for BTC/USDT.
+create_strategy(
+  name="btc-momentum",
+  source_id=12,
+  initial_capital=10000,
+  execution_mode="signal",
+  params={"lookback": 40}
+)
 ```
 
-Typical parameters:
-
-```json
-{
-  "market": "Crypto",
-  "symbol": "BTC/USDT",
-  "timeframe": "1H",
-  "limit": 300
-}
-```
-
-### Create an indicator and backtest it
-
-Recommended flow:
-
-1. `get_indicator_authoring_contract`
-2. `validate_indicator_code`
-3. `save_indicator`
-4. `create_strategy`
-5. `submit_backtest`
-6. `wait_for_job` or `stream_job_until_done`
-
-Prompt example:
+Run a backtest directly from V2 code:
 
 ```text
-Call `get_indicator_authoring_contract`, write a simple SMA crossover indicator,
-validate it with `validate_indicator_code`, save it with `save_indicator`, then
-run `submit_backtest` on BTC/USDT 1H from 2024-01-01 to 2024-06-30.
-Use `wait_for_job` for the result.
+submit_backtest(
+  code="...Strategy API V2 Python...",
+  start_date="2025-01-01",
+  end_date="2025-12-31",
+  initial_capital=10000,
+  params={"lookback": 40},
+  idempotency_key="btc-momentum-2025"
+)
 ```
 
-### Runtime overview
+Market, symbol, and timeframe are not backtest parameters. They come from the compiled strategy manifest. Use `wait_for_job` or `stream_job_until_done` to obtain the result.
 
-```text
-Use `runtime_overview` and summarize all running strategies, positions,
-pending orders, paper orders, and unrealized PnL.
-```
+Indicators are chart-only. Validate and save them through the indicator tools, then convert the idea into Strategy API V2 code before using `submit_backtest` or `create_strategy`.
 
-Requires scope: **R**
+Restoring an older source snapshot requires `confirm_restore=true`. Cancelling open paper orders requires `confirm_cancel=true`. Neither action starts a strategy or places a live order.
 
-### Stop a strategy
+## Development
 
-Stopping is a runtime state change, so it requires explicit confirmation:
-
-```text
-Stop strategy 123 using `stop_strategy` with `confirm_stop=true`.
-```
-
-Tool call shape:
-
-```json
-{
-  "strategy_id": 123,
-  "confirm_stop": true
-}
-```
-
-Requires scope: **T**
-
-### Place a paper or live quick order
-
-Order placement is always explicit:
-
-```text
-Place a small paper quick order on BTC/USDT using `place_quick_order` with
-confirm_order=true. Do not use live trading unless I explicitly say so.
-```
-
-Paper-order call shape:
-
-```json
-{
-  "market": "Crypto",
-  "symbol": "BTC/USDT",
-  "side": "buy",
-  "qty": 0.001,
-  "order_type": "market",
-  "market_type": "spot",
-  "confirm_order": true
-}
-```
-
-Live-order call shape:
-
-```json
-{
-  "market": "Crypto",
-  "symbol": "BTC/USDT",
-  "side": "buy",
-  "qty": 0.001,
-  "order_type": "market",
-  "market_type": "spot",
-  "credential_id": 1,
-  "confirm_order": true,
-  "confirm_live_trading": true
-}
-```
-
-Live orders require all of the following:
-
-- Agent Token has **T** scope.
-- Token is issued with `paper_only=false`.
-- The backend has `AGENT_LIVE_TRADING_ENABLED=true`.
-- The tool call includes `confirm_order=true`.
-- The tool call includes `confirm_live_trading=true`.
-- `credential_id` points to a saved exchange credential owned by the user.
-
-### Job streaming
-
-For long-running backtests or optimization jobs:
-
-```text
-Submit the backtest, then use `stream_job_until_done` with a 300 second cap.
-If streaming is unavailable, use `wait_for_job`.
+```bash
+pip install -e './mcp_server[dev]'
+pytest mcp_server/tests
 ```

@@ -73,3 +73,23 @@ def test_apply_http_settings_without_error(monkeypatch, fresh_module):
     fresh_module._apply_http_settings_from_env()
     assert fake_settings.host == "0.0.0.0"
     assert fake_settings.port == 7777
+
+
+def test_non_loopback_http_requires_auth(monkeypatch, fresh_module):
+    monkeypatch.setattr(fresh_module.mcp.settings, "host", "0.0.0.0")
+    monkeypatch.setattr(fresh_module, "MCP_AUTH_TOKEN", "")
+    monkeypatch.delenv("QUANTDINGER_MCP_ALLOW_INSECURE_HTTP", raising=False)
+    with pytest.raises(SystemExit):
+        fresh_module._validate_network_security("streamable-http")
+
+
+def test_non_loopback_http_accepts_distinct_strong_auth(monkeypatch, fresh_module):
+    monkeypatch.setattr(fresh_module.mcp.settings, "host", "0.0.0.0")
+    monkeypatch.setattr(fresh_module, "MCP_AUTH_TOKEN", "mcp_" + "x" * 40)
+    monkeypatch.setattr(fresh_module, "AGENT_TOKEN", "qd_agent_different")
+    fresh_module._validate_network_security("streamable-http")
+
+
+def test_invalid_numeric_env_uses_default(monkeypatch, fresh_module):
+    monkeypatch.setenv("QUANTDINGER_TIMEOUT_S", "not-a-number")
+    assert fresh_module._env_float("QUANTDINGER_TIMEOUT_S", 60.0) == 60.0

@@ -3,13 +3,13 @@ OpenAPI / flask-smorest integration for the QuantDinger human web API.
 
 Documented routes live here and are merged into ``docs/api/openapi.yaml`` by
 ``scripts/export_openapi.py``. Legacy Blueprint routes remain in ``app/routes/``
-until migrated module-by-module (see ``docs/API_CONVENTIONS.md``).
+until migrated module-by-module (see ``docs/architecture/API_CONVENTIONS.md``).
 """
 from __future__ import annotations
 
 import os
 
-from flask import Flask
+from flask import Flask, jsonify
 from flask_smorest import Api
 
 from app._version import APP_VERSION
@@ -37,7 +37,7 @@ def init_openapi(app: Flask) -> Api:
             "Human-facing REST API for QuantDinger. "
             "Agent integrations use `/api/agent/v1` — see "
             "`docs/agent/agent-openapi.json`. "
-            "Conventions: `docs/API_CONVENTIONS.md`."
+            "Conventions: `docs/architecture/API_CONVENTIONS.md`."
         ),
     )
     app.config.setdefault("OPENAPI_URL_PREFIX", "/")
@@ -48,7 +48,7 @@ def init_openapi(app: Flask) -> Api:
                 "description": app.config.get("OPENAPI_DESCRIPTION", ""),
                 "contact": {
                     "name": "QuantDinger",
-                    "url": "https://github.com/brokermr810/quantdinger",
+                    "url": "https://github.com/OpenByteInc/quantdinger",
                 },
                 "license": {
                     "name": "See repository LICENSE",
@@ -109,6 +109,18 @@ def init_openapi(app: Flask) -> Api:
         )
 
     api = Api(app)
+
+    @app.errorhandler(422)
+    def handle_validation_error(error):
+        details = getattr(error, "data", {}) or {}
+        messages = details.get("messages") or details.get("errors") or {}
+        return jsonify(
+            {
+                "code": 0,
+                "msg": "Invalid request data",
+                "data": {"errors": messages},
+            }
+        ), 400
 
     # Register component schemas so they appear in the exported spec even
     # before every route uses them explicitly.

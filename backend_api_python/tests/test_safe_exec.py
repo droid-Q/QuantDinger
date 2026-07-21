@@ -1,4 +1,4 @@
-"""Sandbox static validation and known escape regression tests."""
+﻿"""Sandbox static validation and known escape regression tests."""
 
 from app.utils.safe_exec import build_safe_builtins, safe_exec_with_validation, validate_code_safety
 
@@ -51,56 +51,55 @@ def test_legit_indicator_passes_validator():
     assert ok is True
     assert err is None
 
-
 def test_operator_import_rejected():
     ok, _ = validate_code_safety("import operator\noutput = {}")
     assert ok is False
 
 
-# pandas.io.common.urlopen — local file read / SSRF bypassing read_csv bans.
+# pandas.io.common.urlopen can bypass read_csv bans for local file reads or SSRF.
 _PD_IO_FILE_READ_ESCAPE = """
-def on_bar(ctx, bar):
+def run(context, data):
     import pandas as pd
     data = pd.io.common.urlopen('file:///etc/passwd').read()
-    ctx.log(str(data[:200]))
+    context.log(str(data[:200]))
 """
 
 _PD_IO_ATTR_ESCAPE = """
-def on_bar(ctx, bar):
+def run(context, data):
     import pandas as pd
     x = pd.io
 """
 
 _PD_LIBS_ESCAPE = """
-def on_bar(ctx, bar):
+def run(context, data):
     import pandas as pd
     x = pd._libs
 """
 
 _PD_IO_IMPORT_ESCAPE = """
-def on_bar(ctx, bar):
+def run(context, data):
     import pandas.io.common as common
     data = common.urlopen('file:///etc/passwd').read()
-    ctx.log(str(data[:200]))
+    context.log(str(data[:200]))
 """
 
 _NP_CTYPESLIB_IMPORT_ESCAPE = """
-def on_bar(ctx, bar):
+def run(context, data):
     import numpy.ctypeslib as ctypeslib
-    ctx.log(str(ctypeslib))
+    context.log(str(ctypeslib))
 """
 
 _FROM_PD_IO_IMPORT_ESCAPE = """
-def on_bar(ctx, bar):
+def run(context, data):
     from pandas.io import common
-    ctx.log(str(common))
+    context.log(str(common))
 """
 
 _LEGIT_PANDAS_STRATEGY = """
-def on_bar(ctx, bar):
+def run(context, data):
     import pandas as pd
     df = pd.DataFrame({'a': [1, 2, 3]})
-    ctx.log(str(float(df['a'].mean())))
+    context.log(str(float(df['a'].mean())))
 """
 
 

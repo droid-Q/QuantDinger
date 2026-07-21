@@ -79,6 +79,10 @@ def detect_hedge_position_mode(
         hedge = client.is_hedge_position_mode(symbol=sym)
         return bool(hedge), "bybit_hedge_mode" if hedge else "bybit_one_way_mode"
 
+    if hasattr(client, "get_swap_hedge_mode") and callable(getattr(client, "get_swap_hedge_mode")):
+        hedge = client.get_swap_hedge_mode(symbol=sym)
+        return bool(hedge), "htx_dual_side" if hedge else "htx_single_side"
+
     if exchange_id in ("bitget", "bitget_mix"):
         return None, "bitget_unknown"
     if exchange_id in ("binance", "binanceusdm"):
@@ -87,6 +91,8 @@ def detect_hedge_position_mode(
         return None, "okx_unknown"
     if exchange_id == "bybit":
         return None, "bybit_unknown"
+    if exchange_id in ("gate", "gateio"):
+        return False, "gate_one_way_mode"
 
     try:
         from app.services.live_trading.bitget import BitgetMixClient

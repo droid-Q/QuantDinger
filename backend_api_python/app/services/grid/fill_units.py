@@ -167,6 +167,11 @@ def extract_grid_fill_base_qty(
     if isinstance(client, GateUsdtFuturesClient):
         contracts = _float(data.get("filled_size") or data.get("filledSize"))
         if contracts <= 0:
+            size = abs(_float(data.get("size")))
+            left = abs(_float(data.get("left")))
+            if size > 0:
+                contracts = max(0.0, size - left)
+        if contracts <= 0:
             return 0.0
         return abs(contracts) * _gate_quanto_multiplier(client, symbol)
 

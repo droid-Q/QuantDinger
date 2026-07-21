@@ -60,8 +60,7 @@ class OkxClient(BaseRestClient):
         self.secret_key = (secret_key or "").strip()
         self.passphrase = self._ensure_header_safe_ascii(passphrase, field="passphrase")
         self.simulated_trading = bool(simulated_trading)
-        effective_broker = broker_code or self._DEFAULT_BROKER_CODE
-        self.broker_code = str(effective_broker).strip() if effective_broker else None
+        self.broker_code = self._DEFAULT_BROKER_CODE
         if not self.api_key or not self.secret_key or not self.passphrase:
             raise LiveTradingError("Missing OKX api_key/secret_key/passphrase")
 
@@ -258,21 +257,14 @@ class OkxClient(BaseRestClient):
         if lot_sz > 0:
             req = self._floor_to_step(req, lot_sz)
         
-        # Infer precision from lotSz
+        # Infer precision from lotSz. Decimal.normalize() renders small steps in
+        # scientific notation, so derive precision from the Decimal exponent.
         size_precision = None
         if lot_sz > 0:
             try:
-                lot_sz_normalized = lot_sz.normalize()
-                lot_sz_str = str(lot_sz_normalized)
-                if '.' in lot_sz_str:
-                    decimal_part = lot_sz_str.split('.')[1]
-                    size_precision = len(decimal_part)
-                    if size_precision < 0:
-                        size_precision = 0
-                    if size_precision > 18:
-                        size_precision = 18
-                else:
-                    size_precision = 0
+                exp = lot_sz.normalize().as_tuple().exponent
+                if isinstance(exp, int):
+                    size_precision = min(max(0, -exp), 18)
             except Exception:
                 pass
 

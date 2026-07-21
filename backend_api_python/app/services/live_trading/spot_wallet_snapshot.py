@@ -87,8 +87,9 @@ def _from_bitget_assets(raw: Dict[str, Any]) -> List[Dict[str, Any]]:
             continue
         avail = _pick_free_from_row(row, "available", "avail", "free")
         frozen = _pick_free_from_row(row, "frozen", "lock")
+        locked = _pick_free_from_row(row, "locked")
         total = _pick_free_from_row(row, "total", "balance")
-        qty = total if total > 0 else avail + frozen
+        qty = total if total > 0 else avail + frozen + locked
         entry = _pick_cost_from_row(row, "averageOpenPrice", "avgOpenPrice", "avgCost", "openAvgPx")
         _append_row(rows, ccy, qty, entry_price=entry)
     return rows
@@ -168,60 +169,27 @@ def list_spot_wallet_positions(client: Any) -> List[Dict[str, Any]]:
     if client is None:
         return []
 
-    try:
-        from app.services.live_trading.okx import OkxClient
+    from app.services.live_trading.binance_spot import BinanceSpotClient
+    from app.services.live_trading.bitget_spot import BitgetSpotClient
+    from app.services.live_trading.bybit import BybitClient
+    from app.services.live_trading.gate import GateSpotClient
+    from app.services.live_trading.htx import HtxClient
+    from app.services.live_trading.kraken import KrakenClient
+    from app.services.live_trading.okx import OkxClient
 
-        if isinstance(client, OkxClient):
-            return _from_okx_balance(client.get_balance() or {})
-    except Exception as e:
-        logger.debug("spot wallet okx: %s", e)
-
-    try:
-        from app.services.live_trading.binance_spot import BinanceSpotClient
-
-        if isinstance(client, BinanceSpotClient):
-            return _from_binance_spot_account(client.get_account() or {})
-    except Exception as e:
-        logger.debug("spot wallet binance: %s", e)
-
-    try:
-        from app.services.live_trading.bitget_spot import BitgetSpotClient
-
-        if isinstance(client, BitgetSpotClient):
-            return _from_bitget_assets(client.get_assets() or {})
-    except Exception as e:
-        logger.debug("spot wallet bitget: %s", e)
-
-    try:
-        from app.services.live_trading.bybit import BybitClient
-
-        if isinstance(client, BybitClient):
-            return _from_bybit_spot_holdings(client.get_spot_holdings() or {})
-    except Exception as e:
-        logger.debug("spot wallet bybit: %s", e)
-
-    try:
-        from app.services.live_trading.gate import GateSpotClient
-
-        if isinstance(client, GateSpotClient):
-            return _from_gate_spot_accounts(client.get_accounts() or [])
-    except Exception as e:
-        logger.debug("spot wallet gate: %s", e)
-
-    try:
-        from app.services.live_trading.htx import HtxClient
-
-        if isinstance(client, HtxClient) and str(getattr(client, "market_type", "") or "").strip().lower() == "spot":
-            return _from_htx_spot_balance(client.get_balance() or {})
-    except Exception as e:
-        logger.debug("spot wallet htx: %s", e)
-
-    try:
-        from app.services.live_trading.kraken import KrakenClient
-
-        if isinstance(client, KrakenClient):
-            return _from_kraken_balance(client.get_balance() or {})
-    except Exception as e:
-        logger.debug("spot wallet kraken: %s", e)
+    if isinstance(client, OkxClient):
+        return _from_okx_balance(client.get_balance() or {})
+    if isinstance(client, BinanceSpotClient):
+        return _from_binance_spot_account(client.get_account() or {})
+    if isinstance(client, BitgetSpotClient):
+        return _from_bitget_assets(client.get_assets() or {})
+    if isinstance(client, BybitClient):
+        return _from_bybit_spot_holdings(client.get_spot_holdings() or {})
+    if isinstance(client, GateSpotClient):
+        return _from_gate_spot_accounts(client.get_accounts() or [])
+    if isinstance(client, HtxClient) and str(getattr(client, "market_type", "") or "").strip().lower() == "spot":
+        return _from_htx_spot_balance(client.get_balance() or {})
+    if isinstance(client, KrakenClient):
+        return _from_kraken_balance(client.get_balance() or {})
 
     return []

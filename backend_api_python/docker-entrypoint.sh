@@ -78,5 +78,42 @@ if [ "$SECRET_LEN" -lt 32 ]; then
 fi
 echo ""
 
-# Start the application
+# Keep credential encryption independent from JWT/session key rotation.
+CURRENT_CREDENTIAL_KEY=$(grep -E "^CREDENTIAL_ENCRYPTION_KEY=" /app/.env 2>/dev/null | cut -d'=' -f2- | tr -d '"' | tr -d "'" | xargs || true)
+CURRENT_CREDENTIAL_KEY=${CURRENT_CREDENTIAL_KEY:-${CREDENTIAL_ENCRYPTION_KEY:-}}
+if [ -z "$CURRENT_CREDENTIAL_KEY" ]; then
+    NEW_CREDENTIAL_KEY=$(python3 -c "import secrets; print(secrets.token_hex(32))")
+    if [ -f /app/.env ] && [ -w /app/.env ]; then
+        echo "CREDENTIAL_ENCRYPTION_KEY=${NEW_CREDENTIAL_KEY}" >> /app/.env
+        echo "[AUTO] Generated persistent CREDENTIAL_ENCRYPTION_KEY."
+    else
+        export CREDENTIAL_ENCRYPTION_KEY="$NEW_CREDENTIAL_KEY"
+        echo "[AUTO] Generated in-memory CREDENTIAL_ENCRYPTION_KEY."
+        echo "[TIP]  Set a persistent CREDENTIAL_ENCRYPTION_KEY before saving broker credentials."
+    fi
+fi
+
+# Prometheus client multiprocess files must start clean for each API container.
+if [ -n "${PROMETHEUS_MULTIPROC_DIR:-}" ]; then
+    mkdir -p "$PROMETHEUS_MULTIPROC_DIR"
+    rm -f "$PROMETHEUS_MULTIPROC_DIR"/*.db
+    chown -R quantdinger:quantdinger "$PROMETHEUS_MULTIPROC_DIR" 2>/dev/null || true
+fi
+
+# Runtime processes do not need root privileges. The entrypoint keeps root only
+# long enough to initialize bind-mounted secrets and volume ownership.
+if [ "$(id -u)" = "0" ] && id quantdinger >/dev/null 2>&1; then
+    chown -R quantdinger:quantdinger /app/logs /app/data 2>/dev/null || true
+    if [ -f /app/.env ]; then
+        if chown quantdinger:quantdinger /app/.env 2>/dev/null; then
+            chmod 600 /app/.env 2>/dev/null || \
+                echo "[WARNING] Could not restrict /app/.env permissions to mode 600."
+        else
+            echo "[WARNING] Could not grant the runtime user ownership of /app/.env."
+            echo "[TIP] System settings will be read-only until /app/.env is writable by UID 10001."
+        fi
+    fi
+    exec gosu quantdinger "$@"
+fi
+
 exec "$@"

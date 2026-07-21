@@ -11,7 +11,6 @@ from app.utils.db import get_db_connection
 from app.utils.logger import get_logger
 
 from .events import append_runtime_event
-from .schema import ensure_strategy_runtime_schema
 
 logger = get_logger(__name__)
 
@@ -87,7 +86,6 @@ def ensure_strategy_run(
     position_mode: str = "",
 ) -> StrategyRunSnapshot:
     """Return an active run for a strategy, creating one if needed."""
-    ensure_strategy_runtime_schema()
     sid = int(strategy_id)
     ch = code_hash_for(code)
     active = _active_run_for_strategy(sid, ch)
@@ -148,3 +146,36 @@ def ensure_strategy_run(
             runtime_epoch=0,
             runtime_status="ephemeral",
         )
+
+
+def finish_strategy_run(strategy_run_id: int, *, reason: str = "") -> None:
+    """Close an active run so the next start receives a new immutable run identity."""
+    run_id = int(strategy_run_id or 0)
+    if run_id <= 0:
+        return
+    try:
+        with get_db_connection() as db:
+            cur = db.cursor()
+            cur.execute(
+                """
+                UPDATE strategy_runs
+                SET runtime_status = 'stopped', stopped_at = NOW(), stop_reason = %s
+                WHERE id = %s AND runtime_status IN ('running', 'recovering', 'paused', 'needs_review')
+                RETURNING strategy_id
+                """,
+                (str(reason or ""), run_id),
+            )
+            row = cur.fetchone() or {}
+            db.commit()
+            cur.close()
+        strategy_id = int(row.get("strategy_id") or 0)
+        if strategy_id > 0:
+            append_runtime_event(
+                strategy_id=strategy_id,
+                strategy_run_id=run_id,
+                event_type="strategy_stopped",
+                message="Strategy run stopped",
+                payload={"reason": str(reason or "")},
+            )
+    except Exception as exc:
+        logger.warning("strategy run finish failed: %s", exc)

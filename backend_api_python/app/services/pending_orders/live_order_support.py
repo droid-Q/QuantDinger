@@ -8,7 +8,7 @@ top of this API.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any, Callable, Dict, Optional, Tuple
 
 from app.services.live_trading.base import LiveTradingError
@@ -60,6 +60,7 @@ class FillAccumulator:
     total_quote: float = 0.0
     total_fee: float = 0.0
     fee_ccy: str = ""
+    fees_by_ccy: Dict[str, float] = field(default_factory=dict)
 
     def apply_fill(self, filled_qty: float, avg_px: float) -> None:
         fq = float(filled_qty or 0.0)
@@ -74,9 +75,14 @@ class FillAccumulator:
         except Exception:
             fv = 0.0
         if fv > 0:
-            self.total_fee += fv
-            if (not self.fee_ccy) and ccy:
-                self.fee_ccy = str(ccy or "")
+            key = str(ccy or "").strip().upper() or "UNKNOWN"
+            self.fees_by_ccy[key] = self.fees_by_ccy.get(key, 0.0) + fv
+            if len(self.fees_by_ccy) == 1:
+                self.fee_ccy = "" if key == "UNKNOWN" else key
+                self.total_fee = next(iter(self.fees_by_ccy.values()))
+            else:
+                self.fee_ccy = "MIXED"
+                self.total_fee = 0.0
 
     def avg_price(self) -> float:
         return float(self.total_quote / self.total_base) if self.total_base > 0 else 0.0

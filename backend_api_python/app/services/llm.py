@@ -17,6 +17,15 @@ from app.utils.config_loader import load_addon_config
 logger = get_logger(__name__)
 
 
+class LLMAPIError(ValueError):
+    """Provider HTTP error with status and request metadata preserved."""
+
+    def __init__(self, message: str, *, status_code: int, request_id: str = ""):
+        super().__init__(message)
+        self.status_code = status_code
+        self.request_id = request_id
+
+
 class LLMProvider(Enum):
     """Supported LLM providers"""
     OPENROUTER = "openrouter"
@@ -60,7 +69,7 @@ PROVIDER_CONFIGS = {
     LLMProvider.ATLASCLOUD: {
         "base_url": "https://api.atlascloud.ai/v1",
         "default_model": "openai/gpt-5.4",
-        "fallback_model": "deepseek-v3",
+        "fallback_model": "openai/gpt-5.4",
     },
     LLMProvider.CUSTOM: {
         "base_url": "",  # User configured via CUSTOM_API_URL
@@ -189,6 +198,15 @@ class LLMService:
             return model
         return self.get_default_model(provider)
 
+    def is_configured(self, provider: LLMProvider = None) -> bool:
+        """Return whether the provider has enough configuration to make a request."""
+        p = provider or self.provider
+        if (self.get_api_key(p) or "").strip():
+            return True
+        if p == LLMProvider.CUSTOM:
+            return bool((self.get_base_url(p) or "").strip())
+        return p == LLMProvider.LITELLM
+
     # Legacy properties for backward compatibility
     @property
     def api_key(self):
@@ -240,6 +258,11 @@ class LLMService:
             kwargs["proxies"] = {"http": proxy_url, "https": proxy_url}
 
         try:
+            if not stream and not proxy_url:
+                session.close()
+                post_kwargs = dict(kwargs)
+                post_kwargs.pop("stream", None)
+                return requests.post(url, **post_kwargs)
             response = session.post(url, **kwargs)
         except requests.exceptions.RequestException as exc:
             session.close()
@@ -291,18 +314,22 @@ class LLMService:
         
         # Handle non-2xx with provider/model-aware details
         if response.status_code >= 400:
-            provider_name = "OpenRouter" if "openrouter" in (base_url or "").lower() else "LLM"
-            error_msg = f"{provider_name} API {response.status_code}"
-            err_text = ""
-            try:
-                error_data = response.json() or {}
-                error_detail = error_data.get("error")
-                if isinstance(error_detail, dict):
-                    err_text = str(error_detail.get("message") or "").strip()
-                elif isinstance(error_detail, str):
-                    err_text = error_detail.strip()
-            except Exception:
-                err_text = (response.text or "").strip()[:300]
+            normalized_base_url = (base_url or "").lower()
+            if "atlascloud" in normalized_base_url:
+                provider_name = "AtlasCloud"
+            elif "openrouter" in normalized_base_url:
+                provider_name = "OpenRouter"
+            else:
+                provider_name = "LLM"
+            err_text = self._extract_provider_error(response)
+            request_id = self._provider_request_id(response)
+            metadata = [f"model={model}"]
+            if request_id:
+                metadata.append(f"request_id={request_id}")
+            error_msg = (
+                f"{provider_name} API {response.status_code} "
+                f"({', '.join(metadata)})"
+            )
 
             if err_text:
                 error_msg = f"{error_msg}: {err_text}"
@@ -317,7 +344,11 @@ class LLMService:
                 elif response.status_code == 404:
                     error_msg += ". 可能原因：模型不可用或账户隐私/数据策略限制。请检查 https://openrouter.ai/settings/privacy"
 
-            raise ValueError(error_msg)
+            raise LLMAPIError(
+                error_msg,
+                status_code=response.status_code,
+                request_id=request_id,
+            )
         
         result = response.json()
         if "choices" in result and len(result["choices"]) > 0:
@@ -327,6 +358,64 @@ class LLMService:
             return content
         else:
             raise ValueError("API response is missing 'choices'")
+
+    @staticmethod
+    def _provider_request_id(response) -> str:
+        headers = getattr(response, "headers", None) or {}
+        for name in (
+            "x-request-id",
+            "request-id",
+            "x-correlation-id",
+            "cf-ray",
+        ):
+            value = headers.get(name) or headers.get(name.title())
+            if value:
+                return str(value).strip()[:200]
+        return ""
+
+    @classmethod
+    def _extract_provider_error(cls, response) -> str:
+        payload = None
+        try:
+            payload = response.json()
+        except Exception:
+            pass
+
+        detail = cls._format_provider_error_value(payload)
+        if not detail:
+            detail = str(getattr(response, "text", "") or "").strip()
+        return " ".join(detail.split())[:1000]
+
+    @classmethod
+    def _format_provider_error_value(cls, value) -> str:
+        if isinstance(value, str):
+            return value.strip()
+        if isinstance(value, list):
+            parts = [cls._format_provider_error_value(item) for item in value]
+            return "; ".join(part for part in parts if part)
+        if not isinstance(value, dict):
+            return ""
+
+        parts = []
+        location = value.get("loc") or value.get("location")
+        if isinstance(location, (list, tuple)):
+            location = ".".join(str(item) for item in location)
+        if location:
+            parts.append(str(location).strip())
+
+        for key in ("error", "message", "msg", "detail", "reason"):
+            if key not in value:
+                continue
+            text = cls._format_provider_error_value(value.get(key))
+            if text and text not in parts:
+                parts.append(text)
+
+        if not parts:
+            for key in ("code", "type", "status"):
+                item = value.get(key)
+                if isinstance(item, (str, int, float)) and str(item).strip():
+                    parts.append(f"{key}={item}")
+        return ": ".join(parts)
 
     def _call_google_gemini(self, messages: list, model: str, temperature: float,
                            api_key: str, base_url: str, timeout: int) -> str:
@@ -603,8 +692,26 @@ class LLMService:
             2. Otherwise, use the configured LLM_PROVIDER with normalized model name
             3. Fall back to provider's default model if model name is incompatible
         """
-        # Smart provider detection: if model specifies a provider and we have its API key, use it
-        if model and not provider:
+        cfg = load_addon_config()
+        explicit_provider_name = str(
+            cfg.get('llm', {}).get('provider') or os.getenv('LLM_PROVIDER', '')
+        ).strip().lower()
+        explicit_provider = None
+        if explicit_provider_name:
+            try:
+                explicit_provider = LLMProvider(explicit_provider_name)
+            except ValueError:
+                explicit_provider = None
+        override_provider = None
+        if self._provider_override:
+            try:
+                override_provider = LLMProvider(self._provider_override.lower())
+            except ValueError:
+                override_provider = None
+
+        # Infer a provider from the model only when no provider was selected explicitly.
+        provider_is_locked = provider is not None or override_provider is not None or explicit_provider is not None
+        if model and not provider_is_locked:
             detected_provider = self._detect_provider_from_model(model)
             if detected_provider and detected_provider != LLMProvider.OPENROUTER:
                 # Check if we have API key for the detected provider
@@ -613,21 +720,9 @@ class LLMService:
                     logger.debug(f"Auto-detected provider '{provider.value}' from model '{model}'")
         
         p = provider or self.provider
-        cfg = load_addon_config()
-        explicit_provider_name = str(cfg.get('llm', {}).get('provider') or os.getenv('LLM_PROVIDER', '')).strip().lower()
-        explicit_provider = None
-        if explicit_provider_name:
-            try:
-                explicit_provider = LLMProvider(explicit_provider_name)
-            except ValueError:
-                explicit_provider = None
         api_key = (self.get_api_key(p) or "").strip()
         base_url = (self.get_base_url(p) or "").strip()
-        # Local OpenAI-compatible servers (e.g. Ollama) often use no API key when base_url is set.
-        # LiteLLM reads provider-specific env vars (OPENAI_API_KEY, ANTHROPIC_API_KEY, etc.) directly.
-        custom_ok_without_key = (p == LLMProvider.CUSTOM and bool(base_url)) or p == LLMProvider.LITELLM
-
-        if not api_key and not custom_ok_without_key:
+        if not self.is_configured(p):
             # If provider is explicitly configured by user, don't silently switch.
             if explicit_provider is not None and p == explicit_provider:
                 if p == LLMProvider.CUSTOM:
@@ -647,10 +742,9 @@ class LLMService:
                         p = alt_provider
                         api_key = (self.get_api_key(p) or "").strip()
                         base_url = (self.get_base_url(p) or "").strip()
-                        custom_ok_without_key = p == LLMProvider.CUSTOM and bool(base_url)
                         break
             
-            if not api_key and not custom_ok_without_key:
+            if not self.is_configured(p):
                 raise ValueError(f"API key not configured for provider: {p.value}. Please configure at least one LLM provider API key.")
 
         if p == LLMProvider.CUSTOM and not base_url:
@@ -668,14 +762,22 @@ class LLMService:
         
         # Build model candidates
         models_to_try = [model]
-        provider_default_model = PROVIDER_CONFIGS[p]["default_model"]
         if use_fallback:
-            fallback = PROVIDER_CONFIGS[p].get("fallback_model")
-            if fallback and fallback != model:
-                models_to_try.append(fallback)
+            configured_default = self._normalize_model_for_provider(
+                self.get_default_model(p),
+                p,
+            )
+            static_fallback = self._normalize_model_for_provider(
+                PROVIDER_CONFIGS[p].get("fallback_model") or "",
+                p,
+            )
+            for candidate in (configured_default, static_fallback):
+                if candidate and candidate not in models_to_try:
+                    models_to_try.append(candidate)
         
         last_error = None
         last_status_code = None
+        attempt_errors = []
         
         for current_model in models_to_try:
             try:
@@ -698,6 +800,60 @@ class LLMService:
                         use_json_mode=use_json_mode
                     )
                     
+            except LLMAPIError as e:
+                status_code = e.status_code
+                last_status_code = status_code
+                last_error = str(e)
+                attempt_errors.append((current_model, str(e)))
+                logger.warning(
+                    "%s API HTTP error (%s): %s",
+                    p.value,
+                    current_model,
+                    e,
+                )
+
+                if (
+                    status_code in (402, 403)
+                    and try_alternative_providers
+                    and current_model == models_to_try[-1]
+                ):
+                    logger.warning(
+                        "%s returned %s. Trying alternative providers...",
+                        p.value,
+                        status_code,
+                    )
+                    return self._try_alternative_providers(
+                        messages,
+                        original_model,
+                        temperature,
+                        use_json_mode,
+                        excluded_provider=p,
+                    )
+
+                if not use_fallback:
+                    raise
+
+                if current_model == models_to_try[-1]:
+                    if len(attempt_errors) > 1:
+                        attempts = "; ".join(
+                            f"{attempt_model}: {attempt_error}"
+                            for attempt_model, attempt_error in attempt_errors
+                        )
+                        raise LLMAPIError(
+                            f"All model calls failed for {p.value}. Attempts: {attempts}",
+                            status_code=status_code,
+                            request_id=e.request_id,
+                        ) from e
+                    raise
+
+                logger.warning(
+                    "%s returned %s for model %s; trying fallback model...",
+                    p.value,
+                    status_code,
+                    current_model,
+                )
+                continue
+
             except requests.exceptions.HTTPError as e:
                 error_detail = e.response.text if e.response else str(e)
                 status_code = e.response.status_code if e.response else None
@@ -749,8 +905,7 @@ class LLMService:
         p = self.provider
         api_key = (self.get_api_key(p) or "").strip()
         base_url = (self.get_base_url(p) or "").strip()
-        custom_ok_without_key = (p == LLMProvider.CUSTOM and bool(base_url))
-        if not api_key and not custom_ok_without_key:
+        if not self.is_configured(p):
             raise ValueError(f"API key not configured for provider: {p.value}. Please set {p.value.upper()}_API_KEY in settings.")
         if p == LLMProvider.GOOGLE:
             yield self.call_llm_api(messages, model=model, temperature=temperature, use_json_mode=False)

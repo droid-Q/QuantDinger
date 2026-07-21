@@ -23,6 +23,7 @@ from app.services.market.watchlist import (
     remove_watchlist_item,
     validate_watchlist_pair,
 )
+from app.services.market_context import default_crypto_exchange_id
 from app.utils.request_guard import RequestGuardError, cache_key, guarded_cached
 from app.utils.market_visibility import is_market_visible, filter_market_items
 
@@ -157,17 +158,25 @@ def get_menu_footer_config():
 def search_symbols():
     """
     Lightweight symbol search.
-    DB seed first; for Crypto, falls back to exchange market list when DB yields few results.
+    Crypto search is local-only; exchange catalogs are refreshed by the background sync task.
     """
     try:
         market = (request.args.get('market') or '').strip()
         keyword = (request.args.get('keyword') or '').strip().upper()
         limit = int(request.args.get('limit') or 20)
+        exchange_id = (request.args.get('exchange_id') or request.args.get('exchangeId') or '').strip()
+        market_type = (request.args.get('market_type') or request.args.get('marketType') or '').strip()
 
         if not market or not keyword:
             return jsonify({'code': 1, 'msg': 'success', 'data': []})
 
-        out = search_market_symbols(market=market, keyword=keyword, limit=limit)
+        out = search_market_symbols(
+            market=market,
+            keyword=keyword,
+            limit=limit,
+            exchange_id=exchange_id,
+            market_type=market_type,
+        )
         return jsonify({'code': 1, 'msg': 'success', 'data': out})
     except Exception as e:
         logger.error(f"search_symbols failed: {str(e)}")
@@ -211,6 +220,10 @@ def add_watchlist():
             (data.get('market') or '').strip(),
             normalize_symbol(data.get('symbol')),
             (data.get('name') or '').strip(),
+            exchange_id=(data.get('exchange_id') or data.get('exchangeId') or '').strip(),
+            market_type=(data.get('market_type') or data.get('marketType') or '').strip(),
+            instrument_id=(data.get('instrument_id') or data.get('instrumentId') or '').strip(),
+            settle_currency=(data.get('settle_currency') or data.get('settleCurrency') or '').strip(),
         )
         if not ok:
             return jsonify({'code': 0, 'msg': message, 'data': None}), 400
@@ -229,7 +242,14 @@ def remove_watchlist():
         raw_symbol = normalize_symbol(data.get('symbol'))
         if not raw_symbol:
             return jsonify({'code': 0, 'msg': 'Missing symbol', 'data': None}), 400
-        remove_watchlist_item(g.user_id, (data.get('market') or '').strip(), raw_symbol)
+        remove_watchlist_item(
+            g.user_id,
+            (data.get('market') or '').strip(),
+            raw_symbol,
+            exchange_id=(data.get('exchange_id') or data.get('exchangeId') or '').strip(),
+            market_type=(data.get('market_type') or data.get('marketType') or '').strip(),
+            instrument_id=(data.get('instrument_id') or data.get('instrumentId') or '').strip(),
+        )
         return jsonify({'code': 1, 'msg': 'success', 'data': None})
     except Exception as e:
         logger.error(f"remove_watchlist failed: {str(e)}")
@@ -254,13 +274,13 @@ def get_watchlist_prices():
                 user_id,
             )
 
-        cache_id = cache_key("watchlist_prices", user_id)
+        cache_id = cache_key("watchlist_prices", user_id, default_crypto_exchange_id())
 
         def _compute():
             watchlist = get_user_watchlist_pairs(user_id)
             if not watchlist:
                 return []
-            results = get_price_map(watchlist, timeout_sec=6)
+            results = get_price_map(watchlist, timeout_sec=10)
             success_count = sum(1 for r in results if r.get('price', 0) > 0)
             logger.debug("Watchlist prices: %s/%s successful", success_count, len(results))
             return results
@@ -270,9 +290,10 @@ def get_watchlist_prices():
             _compute,
             ttl_sec=5,
             stale_ttl_sec=120,
-            timeout_sec=7,
+            timeout_sec=11,
             namespace="watchlist_prices",
             max_concurrent=8,
+            cache_if=lambda rows: not rows or all(float(row.get('price') or 0) > 0 for row in rows),
         )
         return jsonify({'code': 1, 'msg': 'success', 'data': results})
     except RequestGuardError as e:
@@ -294,6 +315,8 @@ def get_price():
     try:
         market = (request.args.get('market', '') or '').strip()
         symbol = normalize_symbol(request.args.get('symbol', ''))
+        exchange_id = (request.args.get('exchange_id') or request.args.get('exchangeId') or '').strip()
+        market_type = (request.args.get('market_type') or request.args.get('marketType') or '').strip()
         
         if not market or not symbol:
             return jsonify({
@@ -307,8 +330,8 @@ def get_price():
             return jsonify({'code': 0, 'msg': validation_err, 'data': None}), 400
         
         result = guarded_cached(
-            cache_key("market_price", market, symbol),
-            lambda: get_single_price(market, symbol),
+            cache_key("market_price", market, exchange_id, market_type, symbol),
+            lambda: get_single_price(market, symbol, exchange_id, market_type),
             ttl_sec=5,
             stale_ttl_sec=120,
             timeout_sec=6,

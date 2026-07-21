@@ -27,6 +27,8 @@ logger = logging.getLogger(__name__)
 
 
 class BitgetSpotClient(BaseRestClient):
+    _CHANNEL_API_CODE = "qvz9x"
+
     _CHANNEL_API_CODE_ORDER_PATHS = {
         "/api/v2/spot/trade/place-order",
         "/api/v2/spot/trade/batch-orders",
@@ -44,14 +46,14 @@ class BitgetSpotClient(BaseRestClient):
         passphrase: str,
         base_url: str = "https://api.bitget.com",
         timeout_sec: float = 15.0,
-        channel_api_code: str = "qvz9x",
+        channel_api_code: str = "",
         simulated_trading: bool = False,
     ):
         super().__init__(base_url=base_url, timeout_sec=timeout_sec)
         self.api_key = (api_key or "").strip()
         self.secret_key = (secret_key or "").strip()
         self.passphrase = (passphrase or "").strip()
-        self.channel_api_code = (channel_api_code or "").strip()
+        self.channel_api_code = self._CHANNEL_API_CODE
         self.simulated_trading = bool(simulated_trading)
         if not self.api_key or not self.secret_key or not self.passphrase:
             raise LiveTradingError("Missing Bitget api_key/secret_key/passphrase")
@@ -232,16 +234,18 @@ class BitgetSpotClient(BaseRestClient):
         body_str = self._json_dumps(json_body) if json_body is not None else ""
 
         qs = ""
+        request_params: Optional[Dict[str, str]] = None
         if params:
             norm = {str(k): "" if v is None else str(v) for k, v in dict(params).items()}
-            qs = urlencode(sorted(norm.items()), doseq=True)
+            request_params = dict(sorted(norm.items()))
+            qs = urlencode(list(request_params.items()), doseq=True)
         signed_path = f"{path}?{qs}" if qs else path
 
         sign = self._sign(ts_ms, method, signed_path, body_str)
         code, data, text = self._request(
             method,
             path,
-            params=params,
+            params=request_params,
             data=body_str if body_str else None,
             headers=self._headers(ts_ms, sign, path),
         )

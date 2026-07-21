@@ -1,0 +1,180 @@
+import pandas as pd
+import pytest
+
+from app.services.strategy_v2 import (
+    ProtectionEngine,
+    ProtectionSpec,
+    ProtectionState,
+    StrategyV2BacktestRunner,
+    StrategyV2LiveSession,
+)
+
+
+def _frame(rows):
+    index = pd.date_range("2026-01-01", periods=len(rows), freq="4h")
+    return pd.DataFrame(rows, index=index, columns=["open", "high", "low", "close", "volume"])
+
+
+PROTECTED_ENTRY = """
+def initialize(context):
+    g.symbol = "Crypto:BTC/USDT"
+    context.set_universe([g.symbol])
+    context.subscribe(frequency="4h")
+
+def handle_data(context, data):
+    if get_position(g.symbol).amount == 0:
+        order_target_percent(
+            g.symbol,
+            1.0,
+            reason="entry",
+            stop_loss_pct=0.02,
+            take_profit_pct=0.05,
+        )
+"""
+
+
+def test_backtest_protection_fills_at_gap_open():
+    frame = _frame([
+        (100, 101, 99, 100, 1000),
+        (100, 101, 99, 100, 1000),
+        (95, 96, 94, 95, 1000),
+        (95, 96, 94, 95, 1000),
+    ])
+    result = StrategyV2BacktestRunner(
+        code=PROTECTED_ENTRY,
+        frames={"Crypto:BTC/USDT": frame},
+        initial_capital=10_000,
+        commission=0,
+        slippage=0,
+    ).run()
+
+    closed = result["closedTrades"][0]
+    assert closed["close_reason"] == "stop_loss"
+    assert closed["exit_price"] == pytest.approx(95.0)
+    assert result["protectionEvents"][0]["triggerPrice"] == pytest.approx(98.0)
+
+
+def test_backtest_protection_fills_at_stop_inside_bar():
+    frame = _frame([
+        (100, 101, 99, 100, 1000),
+        (100, 101, 99, 100, 1000),
+        (100, 101, 97, 99, 1000),
+        (99, 100, 98, 99, 1000),
+    ])
+    result = StrategyV2BacktestRunner(
+        code=PROTECTED_ENTRY,
+        frames={"Crypto:BTC/USDT": frame},
+        initial_capital=10_000,
+        commission=0,
+        slippage=0,
+    ).run()
+
+    assert result["closedTrades"][0]["exit_price"] == pytest.approx(98.0)
+
+
+def test_backtest_protection_closes_a_single_crypto_lot_without_repeating():
+    code = """
+def initialize(context):
+    g.symbol = "Crypto:BTC/USDT"
+    g.sent = False
+    context.set_universe([g.symbol])
+    context.subscribe(frequency="4h")
+
+def handle_data(context, data):
+    if not g.sent:
+        order(g.symbol, 0.00000001, reason="entry", stop_loss_pct=0.02)
+        g.sent = True
+"""
+    frame = _frame([
+        (1_000_000, 1_010_000, 990_000, 1_000_000, 1000),
+        (1_000_000, 1_010_000, 990_000, 1_000_000, 1000),
+        (950_000, 960_000, 940_000, 950_000, 1000),
+        (950_000, 960_000, 940_000, 950_000, 1000),
+    ])
+    result = StrategyV2BacktestRunner(
+        code=code,
+        frames={"Crypto:BTC/USDT": frame},
+        initial_capital=10_000,
+        commission=0,
+        slippage=0,
+    ).run()
+
+    assert len(result["protectionEvents"]) == 1
+    assert result["protectionEvents"][0]["reason"] == "stop_loss"
+    assert result["positions"] == {}
+    assert result["totalTrades"] == 1
+
+
+def test_conservative_intrabar_mode_prioritizes_stop_loss():
+    spec = ProtectionSpec(stop_loss_pct=0.02, take_profit_pct=0.05)
+    state = ProtectionState.open(
+        symbol="Crypto:BTC/USDT@spot",
+        side="long",
+        entry_price=100,
+        spec=spec,
+        opened_at="2026-01-01",
+    )
+    decision = ProtectionEngine().evaluate_bar(
+        state,
+        timestamp="2026-01-01 04:00:00",
+        open_price=100,
+        high_price=106,
+        low_price=97,
+    )
+
+    assert decision is not None
+    assert decision.reason == "stop_loss"
+    assert decision.price == pytest.approx(98.0)
+
+
+def test_live_protection_uses_price_ticks_without_new_bar():
+    frame = _frame([(100, 101, 99, 100, 1000)])
+    session = StrategyV2LiveSession(
+        code=PROTECTED_ENTRY,
+        frames={"Crypto:BTC/USDT": frame},
+        initial_capital=10_000,
+    )
+    intents, _, _ = session.process({"Crypto:BTC/USDT": frame})
+    assert intents[0].protection == ProtectionSpec(stop_loss_pct=0.02, take_profit_pct=0.05)
+
+    session.synchronize_positions({
+        "BTC/USDT": {"side": "long", "amount": 1, "avg_cost": 100, "last_price": 100}
+    })
+    exits = session.evaluate_protections(
+        {"Crypto:BTC/USDT@spot": 97.5},
+        timestamp="2026-01-01 00:00:30",
+    )
+
+    assert len(exits) == 1
+    assert exits[0].reason == "stop_loss"
+    assert exits[0].kind == "target_quantity"
+    assert exits[0].value == 0
+
+
+def test_live_protection_snapshot_restores_after_restart():
+    frame = _frame([(100, 101, 99, 100, 1000)])
+    first = StrategyV2LiveSession(
+        code=PROTECTED_ENTRY,
+        frames={"Crypto:BTC/USDT": frame},
+        initial_capital=10_000,
+    )
+    first.process({"Crypto:BTC/USDT": frame})
+    first.synchronize_positions({
+        "BTC/USDT": {"side": "long", "amount": 1, "avg_cost": 100, "last_price": 100}
+    })
+
+    second = StrategyV2LiveSession(
+        code=PROTECTED_ENTRY,
+        frames={"Crypto:BTC/USDT": frame},
+        initial_capital=10_000,
+    )
+    second.restore_protection_snapshot(first.protection_snapshot())
+    second.synchronize_positions({
+        "BTC/USDT": {"side": "long", "amount": 1, "avg_cost": 100, "last_price": 100}
+    })
+
+    exits = second.evaluate_protections(
+        {"Crypto:BTC/USDT@spot": 97},
+        timestamp="2026-01-01 00:01:00",
+    )
+    assert exits[0].reason == "stop_loss"

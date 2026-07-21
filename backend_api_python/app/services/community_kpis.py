@@ -1,14 +1,25 @@
-"""KPI aggregation helpers for community strategy indicators."""
+"""KPI aggregation helpers for marketplace backtest evidence."""
 
 from __future__ import annotations
 
 import json
 from typing import Any, Dict, List, Optional, Tuple
 
-from app.services.experiment.scoring import StrategyScoringService
 from app.utils.logger import get_logger
 
 logger = get_logger(__name__)
+
+
+def _score_result(result: Dict[str, Any]) -> float:
+    trades = float(result.get("totalTrades") or 0)
+    if trades <= 0:
+        return 0.0
+    total_return = float(result.get("totalReturn") or 0)
+    sharpe = float(result.get("sharpeRatio") or 0)
+    drawdown = abs(float(result.get("maxDrawdown") or 0))
+    win_rate = float(result.get("winRate") or 0)
+    score = 50 + total_return * 0.2 + sharpe * 10 + win_rate * 0.1 - drawdown * 0.25
+    return max(0.0, min(100.0, score))
 
 
 def parse_backtest_result(raw: str) -> Optional[Dict[str, Any]]:
@@ -22,7 +33,7 @@ def parse_backtest_result(raw: str) -> Optional[Dict[str, Any]]:
         return None
 
 
-def summarise_indicator_runs(runs: List[Dict[str, Any]]) -> Dict[str, Any]:
+def summarise_backtest_runs(runs: List[Dict[str, Any]]) -> Dict[str, Any]:
     """Aggregate successful backtest runs into a representative KPI block.
 
     The displayed KPIs intentionally come from the same representative
@@ -46,7 +57,6 @@ def summarise_indicator_runs(runs: List[Dict[str, Any]]) -> Dict[str, Any]:
     if not runs:
         return empty
 
-    scorer = StrategyScoringService()
     scored: List[Tuple[float, int, Dict[str, Any]]] = []
     symbols: List[str] = []
     timeframes: List[str] = []
@@ -56,8 +66,7 @@ def summarise_indicator_runs(runs: List[Dict[str, Any]]) -> Dict[str, Any]:
         if not result:
             continue
         try:
-            score_info = scorer.score_result(result)
-            score_val = float(score_info.get("overallScore") or 0)
+            score_val = _score_result(result)
         except Exception:
             logger.debug("score_result failed for run %s", run.get("id"), exc_info=True)
             score_val = 0.0
@@ -100,55 +109,25 @@ def summarise_indicator_runs(runs: List[Dict[str, Any]]) -> Dict[str, Any]:
     }
 
 
-def fetch_indicator_kpis(cur: Any, indicator_ids: List[int]) -> Dict[int, Dict[str, Any]]:
-    """Batch-load KPI summaries for indicator ids."""
-    if not indicator_ids:
-        return {}
-    buckets: Dict[int, List[Dict[str, Any]]] = {indicator_id: [] for indicator_id in indicator_ids}
-    placeholders = ",".join(["%s"] * len(indicator_ids))
-    try:
-        cur.execute(
-            f"""
-            SELECT id, indicator_id, symbol, timeframe, result_json
-            FROM qd_backtest_runs
-            WHERE indicator_id IN ({placeholders})
-              AND status = 'success'
-              AND result_json IS NOT NULL AND result_json != ''
-            """,
-            tuple(indicator_ids),
-        )
-        for row in cur.fetchall() or []:
-            indicator_id = int(row.get("indicator_id") or 0)
-            if indicator_id in buckets:
-                buckets[indicator_id].append(dict(row))
-    except Exception:
-        logger.debug("Batch KPI query failed; returning empty KPIs", exc_info=True)
-        return {indicator_id: summarise_indicator_runs([]) for indicator_id in indicator_ids}
-    return {indicator_id: summarise_indicator_runs(rows) for indicator_id, rows in buckets.items()}
-
-
 def fetch_market_asset_kpis(cur: Any, assets: List[Dict[str, Any]]) -> Dict[int, Dict[str, Any]]:
     """Load representative KPIs for marketplace assets.
 
-    Indicator assets are linked by ``indicator_id``. Script templates and bot
-    presets need their persisted source ids because their backtests are stored
-    as strategy-script/strategy runs rather than indicator runs.
+    Chart-only indicators do not own backtest records. Script templates and
+    bot presets use their persisted source ids because their backtests are
+    stored as strategy-script/strategy runs.
     """
     if not assets:
         return {}
 
     output: Dict[int, Dict[str, Any]] = {}
-    indicator_ids = [
-        int(asset.get("id") or 0)
-        for asset in assets
-        if (asset.get("asset_type") or "indicator") == "indicator"
-    ]
-    output.update(fetch_indicator_kpis(cur, indicator_ids))
 
     for asset in assets:
         asset_id = int(asset.get("id") or 0)
         asset_type = asset.get("asset_type") or "indicator"
-        if not asset_id or asset_type == "indicator":
+        if not asset_id:
+            continue
+        if asset_type == "indicator":
+            output[asset_id] = summarise_backtest_runs([])
             continue
 
         rows: List[Dict[str, Any]] = []
@@ -160,18 +139,11 @@ def fetch_market_asset_kpis(cur: Any, assets: List[Dict[str, Any]]) -> Dict[int,
                     """
                     SELECT id, symbol, timeframe, start_date, end_date, result_json
                     FROM qd_backtest_runs
-                    WHERE run_type = 'strategy_script'
+                    WHERE source_id = %s
                       AND status = 'success'
                       AND result_json IS NOT NULL AND result_json != ''
-                      AND (
-                        config_snapshot::text LIKE %s
-                        OR config_snapshot::text LIKE %s
-                      )
                     """,
-                    (
-                        f'%"scriptSourceId": {source_script_id}%',
-                        f'%"scriptSourceId":{source_script_id}%',
-                    ),
+                    (source_script_id,),
                 )
                 rows = [dict(row) for row in (cur.fetchall() or [])]
             elif source_strategy_id:
@@ -180,7 +152,6 @@ def fetch_market_asset_kpis(cur: Any, assets: List[Dict[str, Any]]) -> Dict[int,
                     SELECT id, symbol, timeframe, start_date, end_date, result_json
                     FROM qd_backtest_runs
                     WHERE strategy_id = %s
-                      AND run_type LIKE 'strategy_%%'
                       AND status = 'success'
                       AND result_json IS NOT NULL AND result_json != ''
                     """,
@@ -189,6 +160,6 @@ def fetch_market_asset_kpis(cur: Any, assets: List[Dict[str, Any]]) -> Dict[int,
                 rows = [dict(row) for row in (cur.fetchall() or [])]
         except Exception:
             logger.debug("Marketplace KPI query failed for asset %s", asset_id, exc_info=True)
-        output[asset_id] = summarise_indicator_runs(rows)
+        output[asset_id] = summarise_backtest_runs(rows)
 
-    return {int(asset.get("id") or 0): output.get(int(asset.get("id") or 0), summarise_indicator_runs([])) for asset in assets}
+    return {int(asset.get("id") or 0): output.get(int(asset.get("id") or 0), summarise_backtest_runs([])) for asset in assets}

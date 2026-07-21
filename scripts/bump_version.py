@@ -2,7 +2,7 @@
 """Bump backend fallback version files.
 
 Usage:
-    python scripts/bump_version.py 3.0.14
+    python scripts/bump_version.py 5.0.1
 
 Release builds should normally get the displayed version from a Git tag via
 Docker/CI build args. The repo-root ``VERSION`` file is only a local/dev

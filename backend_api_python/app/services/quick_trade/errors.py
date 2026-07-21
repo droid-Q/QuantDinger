@@ -9,6 +9,20 @@ from typing import Any, Dict, List
 FRIENDLY_ERROR_PATTERNS = [
     (
         re.compile(
+            r"HTTP\s*451|\b451\b|restricted location|service unavailable from a restricted location",
+            re.IGNORECASE,
+        ),
+        "quickTrade.errorHints.regionRestricted",
+    ),
+    (
+        re.compile(
+            r"OKX_SWAP_ACCOUNT_MODE_REQUIRED|51010|current account mode|unsupported under current account mode",
+            re.IGNORECASE,
+        ),
+        "quickTrade.errorHints.okxAccountMode",
+    ),
+    (
+        re.compile(
             r"INSUFFICIENT[_ ]?AVAILABLE|insufficient.{0,20}(balance|margin|fund)|margin.{0,30}while available|not enough|资金不足",
             re.IGNORECASE,
         ),
@@ -82,6 +96,12 @@ def exchange_error_user_message(*, exchange_id: str, err: str) -> Dict[str, str]
     exchange = (exchange_id or "").strip().lower()
     if not text:
         return {"message": "", "hint_key": ""}
+
+    if "OKX_SWAP_ACCOUNT_MODE_REQUIRED" in text or "51010" in text:
+        return {
+            "message": "OKX_SWAP_ACCOUNT_MODE_REQUIRED",
+            "hint_key": "quickTrade.errorHints.okxAccountMode",
+        }
 
     if "40018" in text or "invalid ip" in low:
         request_ip = extract_request_ip_from_exchange_error(text)

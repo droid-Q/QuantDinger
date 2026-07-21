@@ -3,6 +3,13 @@ FROM ${BASE_IMAGE}
 
 WORKDIR /app
 
+ARG PIP_INDEX_URL=https://pypi.org/simple
+
+ENV PIP_INDEX_URL=${PIP_INDEX_URL} \
+    PIP_DEFAULT_TIMEOUT=120 \
+    PIP_RETRIES=5 \
+    PIP_DISABLE_PIP_VERSION_CHECK=1
+
 RUN apt-get update \
     && apt-get install -y --no-install-recommends ca-certificates \
     && rm -rf /var/lib/apt/lists/*
@@ -10,7 +17,7 @@ RUN apt-get update \
 COPY pyproject.toml README.md LICENSE ./
 COPY src/ ./src/
 
-RUN pip install --no-cache-dir .
+RUN pip install --no-cache-dir --prefer-binary .
 
 # Cloud defaults: bind streamable-http to all interfaces on the platform-supplied
 # port. Override any of these on the platform side; stdio still works locally

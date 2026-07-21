@@ -1,5 +1,9 @@
 """Spot wallet snapshot parsers for all supported exchanges."""
 
+import pytest
+
+from app.services.live_trading.base import LiveTradingError
+from app.services.live_trading.bitget_spot import BitgetSpotClient
 from app.services.live_trading.spot_wallet_snapshot import (
     _from_binance_spot_account,
     _from_bitget_assets,
@@ -43,12 +47,12 @@ def test_binance_spot_balances_parser():
 def test_bitget_spot_assets_parser():
     raw = {
         "data": [
-            {"coin": "BNB", "available": "1.5", "frozen": "0.1", "averageOpenPrice": "600"},
+            {"coin": "BNB", "available": "1.5", "frozen": "0.1", "locked": "0.2", "averageOpenPrice": "600"},
         ]
     }
     rows = _from_bitget_assets(raw)
     assert rows[0]["symbol"] == "BNB/USDT"
-    assert rows[0]["size"] == 1.6
+    assert rows[0]["size"] == 1.8
 
 
 def test_bybit_spot_holdings_parser():
@@ -69,3 +73,14 @@ def test_gate_spot_accounts_parser():
 
 def test_list_spot_wallet_unknown_client():
     assert list_spot_wallet_positions(object()) == []
+
+
+def test_spot_wallet_exchange_errors_are_not_silenced(monkeypatch):
+    client = BitgetSpotClient.__new__(BitgetSpotClient)
+
+    def fail_get_assets(_self):
+        raise LiveTradingError("spot assets unavailable")
+
+    monkeypatch.setattr(BitgetSpotClient, "get_assets", fail_get_assets)
+    with pytest.raises(LiveTradingError, match="spot assets unavailable"):
+        list_spot_wallet_positions(client)

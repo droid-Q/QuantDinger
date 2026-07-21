@@ -1,10 +1,4 @@
-"""
-Grid bot runtime: adaptive price bounds + waterfall (cascade) protection.
-
-Called from TradingExecutor before each grid bot on_bar so existing strategies
-benefit without re-saving script code. Scripts should read upperPrice/lowerPrice
-via ctx.param() each bar (not only in on_init).
-"""
+"""Adaptive grid price bounds and cascade protection helpers."""
 from __future__ import annotations
 
 import time

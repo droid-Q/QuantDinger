@@ -97,6 +97,18 @@ STATIC_MARKET_ROWS: List[Row] = [
     ("MOEX", "PLZL", "Polyus", "MOEX", "RUB"),
 ]
 
+CURATED_ETF_SYMBOLS = {
+    "HKStock": (
+        "02800", "02801", "02823", "02828", "02840", "02846", "03032", "03033", "03037",
+        "03040", "03067", "03075", "03088", "03110", "03188", "03191", "03416", "03437",
+    ),
+    "USStock": (
+        "SPY", "QQQ", "IWM", "DIA", "VTI", "VOO", "IVV", "EFA", "EEM", "AGG", "BND", "TLT",
+        "IEF", "GLD", "SLV", "USO", "XLF", "XLK", "XLE", "XLV", "XLI", "XLY", "XLP", "XLU",
+        "VNQ", "ARKK", "HYG", "LQD", "SCHD", "VUG", "VTV",
+    ),
+}
+
 
 def clean(value: object) -> str:
     return str(value or "").strip()
@@ -299,20 +311,28 @@ def build_sql(rows: List[Row], notes: List[str]) -> str:
     ]
     for note in notes:
         out.append(f"-- {note}")
-    out.extend(["", "INSERT INTO qd_market_symbols (market, symbol, name, exchange, currency, is_active, is_hot, sort_order) VALUES"])
+    out.extend(["", "INSERT INTO qd_market_symbols (market, symbol, name, exchange, currency, market_type, instrument_id, is_active, is_hot, sort_order) VALUES"])
     values = [
-        "  (" + ", ".join([sql_quote(a), sql_quote(b), sql_quote(c), sql_quote(d), sql_quote(e), "1", "0", "0"]) + ")"
+        "  (" + ", ".join([sql_quote(a), sql_quote(b), sql_quote(c), sql_quote(d), sql_quote(e), "'spot'", "''", "1", "0", "0"]) + ")"
         for a, b, c, d, e in rows
     ]
     out.append(",\n".join(values))
     out.extend([
-        "ON CONFLICT (market, symbol) DO UPDATE",
+        "ON CONFLICT (market, symbol, exchange, market_type, instrument_id) DO UPDATE",
         "  SET name = EXCLUDED.name,",
         "      exchange = COALESCE(NULLIF(EXCLUDED.exchange, ''), qd_market_symbols.exchange),",
         "      currency = COALESCE(NULLIF(EXCLUDED.currency, ''), qd_market_symbols.currency),",
         "      is_active = 1;",
         "",
     ])
+    for market, symbols in CURATED_ETF_SYMBOLS.items():
+        quoted_symbols = ",".join(sql_quote(symbol) for symbol in symbols)
+        out.extend([
+            "UPDATE qd_market_symbols",
+            "SET asset_class = 'etf', is_hot = 1, sort_order = GREATEST(sort_order, 80)",
+            f"WHERE market = {sql_quote(market)} AND symbol IN ({quoted_symbols});",
+            "",
+        ])
     return "\n".join(out)
 
 

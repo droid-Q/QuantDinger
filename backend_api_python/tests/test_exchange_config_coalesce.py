@@ -40,12 +40,12 @@ def test_coalesce_reads_root_exchange_id():
     assert cfg["exchange_id"] == "gate"
 
 
-def test_live_script_strategy_validates_after_trading_config_coalesce():
+def test_live_strategy_validates_after_trading_config_coalesce():
     cfg = coalesce_exchange_config_from_payload(
         {
             "execution_mode": "live",
             "market_category": "Crypto",
-            "strategy_type": "ScriptStrategy",
+            "strategy_type": "StrategyV2",
             "trading_config": {
                 "exchange_id": "binance",
                 "market_type": "swap",

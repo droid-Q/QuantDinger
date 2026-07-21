@@ -53,11 +53,13 @@ def _gate_ticker_response_to_normalized(raw: Any) -> Dict[str, Any]:
 
 
 class _GateBase(BaseRestClient):
+    _CHANNEL_ID = "dinger"
+
     def __init__(self, *, api_key: str, secret_key: str, base_url: str = "https://api.gateio.ws", timeout_sec: float = 15.0, channel_id: str = ""):
         super().__init__(base_url=base_url, timeout_sec=timeout_sec)
         self.api_key = (api_key or "").strip()
         self.secret_key = (secret_key or "").strip()
-        self.channel_id = (channel_id or "").strip()
+        self.channel_id = self._CHANNEL_ID
         if not self.api_key or not self.secret_key:
             raise LiveTradingError("Missing Gate api_key/secret_key")
 
@@ -102,14 +104,23 @@ class _GateBase(BaseRestClient):
         ts = str(int(time.time()))
         body_str = self._json_dumps(json_body) if json_body is not None else ""
         qs = ""
+        request_params = None
         if params:
             norm = {str(k): "" if v is None else str(v) for k, v in dict(params).items()}
-            qs = urlencode(sorted(norm.items()), doseq=True)
+            ordered_items = sorted(norm.items())
+            qs = urlencode(ordered_items, doseq=True)
+            request_params = dict(ordered_items)
         sign = self._sign(method=m, url=path, query_string=qs, body_str=body_str, ts=ts)
         hdrs = dict(self._headers(ts, sign))
         if extra_headers:
             hdrs.update({str(k): str(v) for k, v in extra_headers.items()})
-        code, data, text = self._request(m, path, params=params, data=body_str if body_str else None, headers=hdrs)
+        code, data, text = self._request(
+            m,
+            path,
+            params=request_params,
+            data=body_str if body_str else None,
+            headers=hdrs,
+        )
         if code >= 400:
             raise LiveTradingError(f"Gate HTTP {code}: {text[:500]}")
         return data
@@ -475,7 +486,7 @@ class GateUsdtFuturesClient(_GateBase):
             extra_headers={"X-Gate-Size-Decimal": "1"},
         )
 
-    def set_leverage(self, *, contract: str, leverage: float) -> bool:
+    def set_leverage(self, *, contract: str, leverage: float, margin_mode: str = "cross") -> bool:
         c = str(contract or "").strip()
         if not c:
             return False
@@ -489,22 +500,25 @@ class GateUsdtFuturesClient(_GateBase):
         lv_s = str(lv)
         # Gate expects ``leverage`` / ``cross_leverage_limit`` as **query parameters**, not JSON body
         # (see gateapi-python: update_position_leverage). Cross / portfolio mode: leverage=0 + cross_leverage_limit.
-        attempts: Tuple[Dict[str, str], ...] = (
-            {"leverage": lv_s},
-            {"leverage": "0", "cross_leverage_limit": lv_s},
-            {"leverage": lv_s, "cross_leverage_limit": lv_s},
-        )
-        last_err: Optional[Exception] = None
-        for qp in attempts:
-            try:
-                _ = self._signed_request("POST", path, params=qp, json_body=None)
-                return True
-            except LiveTradingError as e:
-                last_err = e
-            except Exception as e:
-                last_err = e
-        logger.warning("Gate set_leverage failed contract=%s leverage=%s: %s", c, lv, last_err)
-        return False
+        mode = str(margin_mode or "cross").strip().lower()
+        if mode in ("cross", "crossed"):
+            params = {"leverage": "0", "cross_leverage_limit": lv_s}
+        elif mode in ("isolated", "iso"):
+            params = {"leverage": lv_s}
+        else:
+            return False
+        try:
+            self._signed_request("POST", path, params=params, json_body=None)
+            return True
+        except Exception as exc:
+            logger.warning(
+                "Gate set_leverage failed contract=%s leverage=%s margin_mode=%s: %s",
+                c,
+                lv,
+                mode,
+                exc,
+            )
+            return False
 
     def place_market_order(
         self,
@@ -654,6 +668,11 @@ class GateUsdtFuturesClient(_GateBase):
             try:
                 # Gate futures often returns "filled_size" in contracts.
                 filled_ct = abs(float(last.get("filled_size") or last.get("filledSize") or 0.0))
+                if filled_ct <= 0:
+                    size_ct = abs(float(last.get("size") or 0.0))
+                    left_ct = abs(float(last.get("left") or 0.0))
+                    if size_ct > 0:
+                        filled_ct = max(0.0, size_ct - left_ct)
                 filled = float(Decimal(str(filled_ct)) * qm)
             except Exception:
                 filled = 0.0

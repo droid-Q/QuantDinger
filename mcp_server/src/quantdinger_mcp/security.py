@@ -11,20 +11,25 @@ import httpx
 MAX_INDICATOR_CODE_BYTES = 512 * 1024
 
 _SECRET_KEYS = frozenset({
-    "api_key", "secret_key", "passphrase", "apiKey", "secret", "password",
-    "private_key", "access_token", "refresh_token", "bot_token",
-    "webhook_secret", "signing_secret", "client_secret",
+    "api_key", "apikey", "secret_key", "secretkey", "passphrase", "secret", "password",
+    "private_key", "privatekey", "access_token", "accesstoken", "refresh_token",
+    "refreshtoken", "bot_token", "bottoken", "webhook_secret", "webhooksecret",
+    "signing_secret", "signingsecret", "client_secret", "clientsecret", "authorization",
 })
 
 _SSE_EVENT_RE = re.compile(r"^event:\s*(\S+)\s*$", re.MULTILINE)
 _SSE_DATA_RE = re.compile(r"^data:\s*(.+)$", re.MULTILINE)
 
 
-def assert_indicator_code_size(code: str) -> None:
+def assert_code_size(code: str, *, label: str = "Code") -> None:
     if len((code or "").encode("utf-8")) > MAX_INDICATOR_CODE_BYTES:
         raise ValueError(
-            f"Indicator code exceeds {MAX_INDICATOR_CODE_BYTES // 1024} KiB MCP limit"
+            f"{label} exceeds {MAX_INDICATOR_CODE_BYTES // 1024} KiB MCP limit"
         )
+
+
+def assert_indicator_code_size(code: str) -> None:
+    assert_code_size(code, label="Indicator code")
 
 
 def assert_json_dict(name: str, value: Any) -> dict:
@@ -37,12 +42,13 @@ def assert_json_dict(name: str, value: Any) -> dict:
 
 def redact_secrets(value: Any, *, depth: int = 0, max_depth: int = 6) -> Any:
     if depth > max_depth:
-        return value
+        return "***"
     if isinstance(value, Mapping):
         out: dict[str, Any] = {}
         for k, v in value.items():
             key = str(k)
-            if key in _SECRET_KEYS and v not in (None, "", False):
+            normalized_key = re.sub(r"[^a-z0-9]+", "_", key.lower()).strip("_")
+            if normalized_key in _SECRET_KEYS and v not in (None, "", False):
                 out[key] = "***"
             elif isinstance(v, Mapping):
                 out[key] = redact_secrets(v, depth=depth + 1, max_depth=max_depth)
@@ -90,8 +96,6 @@ def consume_job_stream(
     max_seconds: float = 300.0,
 ) -> dict[str, Any]:
     """Read job SSE until `result` or safety limits are hit."""
-    import json
-
     params = {"since": int(since_seq)} if since_seq else None
     events: list[dict[str, Any]] = []
     result: dict[str, Any] | None = None
@@ -116,16 +120,16 @@ def consume_job_stream(
             if time.monotonic() - started > max_seconds:
                 truncated = True
                 break
-            buffer += chunk
+            buffer += chunk.replace("\r\n", "\n").replace("\r", "\n")
             while "\n\n" in buffer:
                 part, buffer = buffer.split("\n\n", 1)
                 for event, payload in parse_sse_chunk(part + "\n\n"):
                     events.append({"event": event, "data": payload})
-                    if len(events) > max_events:
-                        truncated = True
-                        break
                     if event == "result":
                         result = payload if isinstance(payload, dict) else {"value": payload}
+                    if len(events) >= max_events and result is None:
+                        truncated = True
+                        break
                 if truncated or result is not None:
                     break
             if truncated or result is not None:

@@ -12,16 +12,6 @@ logger = get_logger(__name__)
 _strategy_service = StrategyService()
 
 
-def _strategy_bucket(row: dict) -> str:
-    mode = str((row or {}).get("strategy_mode") or "").strip().lower()
-    stype = str((row or {}).get("strategy_type") or "").strip()
-    if mode == "bot":
-        return "bot"
-    if mode == "script" or stype == "ScriptStrategy":
-        return "script"
-    return "signal"
-
-
 @agent_v1_bp.route("/runtime/overview", methods=["GET"])
 @agent_required(SCOPE_R)
 def runtime_overview():
@@ -32,7 +22,7 @@ def runtime_overview():
             cur = db.cursor()
             cur.execute(
                 """
-                SELECT id, strategy_name, strategy_type, strategy_mode,
+                SELECT id, strategy_name, strategy_type,
                        execution_mode, status, market_category, symbol,
                        timeframe, initial_capital, market_type, updated_at
                 FROM qd_strategies_trading
@@ -83,9 +73,6 @@ def runtime_overview():
     counts = {
         "strategies_total": len(strategies),
         "running_total": len(running),
-        "running_signal": sum(1 for s in running if _strategy_bucket(s) == "signal"),
-        "running_script": sum(1 for s in running if _strategy_bucket(s) == "script"),
-        "running_bot": sum(1 for s in running if _strategy_bucket(s) == "bot"),
         "running_live": sum(1 for s in running if str(s.get("execution_mode") or "").lower() == "live"),
         "running_signal_mode": sum(1 for s in running if str(s.get("execution_mode") or "").lower() == "signal"),
         "positions": int(position_summary.get("count") or 0),
@@ -99,7 +86,6 @@ def runtime_overview():
             "id": row.get("id"),
             "name": row.get("strategy_name"),
             "type": row.get("strategy_type"),
-            "mode": row.get("strategy_mode") or _strategy_bucket(row),
             "execution_mode": row.get("execution_mode"),
             "market": row.get("market_category"),
             "symbol": row.get("symbol"),

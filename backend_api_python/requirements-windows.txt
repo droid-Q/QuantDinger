@@ -1,2 +1,3 @@
 # Windows-specific optional dependencies.
 MetaTrader5>=5.0.5735
+celery[redis]>=5.5.0,<6

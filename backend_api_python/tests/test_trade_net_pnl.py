@@ -71,3 +71,35 @@ def test_short_leg_does_not_cross_with_long():
     enrich_trades_net_pnl(trades)
     assert trades[2]["open_commission_allocated"] == 5.0
     assert trades[2]["profit"] == 20.0 - 1.0 - 5.0
+
+
+def test_quote_commission_is_used_instead_of_raw_fee_asset_amount():
+    trades = [
+        {
+            "id": 1,
+            "symbol": "BTC/USDT",
+            "type": "open_long",
+            "amount": 1.0,
+            "commission": 0.001,
+            "commission_ccy": "BTC",
+            "commission_quote": 60.0,
+            "profit": None,
+            "created_at": 1,
+        },
+        {
+            "id": 2,
+            "symbol": "BTC/USDT",
+            "type": "close_long",
+            "amount": 1.0,
+            "commission": 10.0,
+            "commission_ccy": "USDT",
+            "commission_quote": 10.0,
+            "profit": 100.0,
+            "created_at": 2,
+        },
+    ]
+
+    enrich_trades_net_pnl(trades)
+
+    assert trades[1]["open_commission_allocated"] == 60.0
+    assert trades[1]["profit"] == 30.0

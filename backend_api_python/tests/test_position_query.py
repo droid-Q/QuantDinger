@@ -188,3 +188,24 @@ def test_bitget_one_way_total_without_hold_side():
         market_type="swap",
     )
     assert qty == pytest.approx(1.8)
+
+
+def test_gate_flat_position_query_returns_zero_in_strict_mode():
+    from app.services.live_trading.gate import GateUsdtFuturesClient
+    from app.services.live_trading.position_query import query_exchange_position_size
+
+    class FakeGate(GateUsdtFuturesClient):
+        def __init__(self):
+            pass
+
+        def get_positions(self):
+            return []
+
+    qty = query_exchange_position_size(
+        client=FakeGate(),
+        symbol="BTC/USDT",
+        pos_side="long",
+        market_type="swap",
+        strict=True,
+    )
+    assert qty == 0.0

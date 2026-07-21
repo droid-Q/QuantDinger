@@ -3,41 +3,6 @@
 from app.utils.db import get_db_connection
 
 
-def ensure_indicator_version_schema(cur) -> None:
-    cur.execute(
-        """
-        CREATE TABLE IF NOT EXISTS qd_indicator_code_versions (
-            id SERIAL PRIMARY KEY,
-            indicator_id INTEGER NOT NULL REFERENCES qd_indicator_codes(id) ON DELETE CASCADE,
-            user_id INTEGER NOT NULL REFERENCES qd_users(id) ON DELETE CASCADE,
-            version_no INTEGER NOT NULL,
-            name VARCHAR(255) NOT NULL DEFAULT '',
-            description TEXT DEFAULT '',
-            code TEXT NOT NULL,
-            created_at TIMESTAMP DEFAULT NOW()
-        )
-        """
-    )
-    cur.execute(
-        """
-        CREATE INDEX IF NOT EXISTS idx_indicator_code_versions_indicator
-        ON qd_indicator_code_versions (indicator_id, version_no DESC)
-        """
-    )
-    cur.execute(
-        """
-        CREATE INDEX IF NOT EXISTS idx_indicator_code_versions_user
-        ON qd_indicator_code_versions (user_id)
-        """
-    )
-    cur.execute(
-        """
-        CREATE UNIQUE INDEX IF NOT EXISTS uq_indicator_code_versions_no
-        ON qd_indicator_code_versions (indicator_id, version_no)
-        """
-    )
-
-
 def insert_indicator_version(cur, indicator_id: int, user_id: int, name: str, description: str, code: str) -> int:
     cur.execute(
         """
@@ -64,7 +29,6 @@ def list_versions(user_id: int, indicator_id: int) -> tuple[bool, list]:
     """Return indicator versions when the indicator belongs to the user."""
     with get_db_connection() as db:
         cur = db.cursor()
-        ensure_indicator_version_schema(cur)
         cur.execute(
             "SELECT id FROM qd_indicator_codes WHERE id = ? AND user_id = ?",
             (indicator_id, user_id),
@@ -92,7 +56,6 @@ def get_version(user_id: int, version_id: int) -> dict | None:
     """Return one saved version for the user."""
     with get_db_connection() as db:
         cur = db.cursor()
-        ensure_indicator_version_schema(cur)
         cur.execute(
             """
             SELECT id, indicator_id, version_no, name, description, code, created_at
@@ -111,13 +74,12 @@ def restore_version(user_id: int, version_id: int, now_ts: int) -> dict | None:
     """Restore one version and record the restore as a new version."""
     with get_db_connection() as db:
         cur = db.cursor()
-        ensure_indicator_version_schema(cur)
         cur.execute(
             """
             SELECT v.indicator_id, v.name, v.description, v.code
             FROM qd_indicator_code_versions v
             JOIN qd_indicator_codes i ON i.id = v.indicator_id
-            WHERE v.id = ? AND v.user_id = ? AND i.user_id = ? AND (i.is_buy IS NULL OR i.is_buy = 0)
+            WHERE v.id = ? AND v.user_id = ? AND i.user_id = ?
             """,
             (version_id, user_id, user_id),
         )
@@ -134,7 +96,7 @@ def restore_version(user_id: int, version_id: int, now_ts: int) -> dict | None:
             """
             UPDATE qd_indicator_codes
             SET name = ?, description = ?, code = ?, updatetime = ?, updated_at = NOW()
-            WHERE id = ? AND user_id = ? AND (is_buy IS NULL OR is_buy = 0)
+            WHERE id = ? AND user_id = ?
             """,
             (name, description, code, now_ts, indicator_id, user_id),
         )

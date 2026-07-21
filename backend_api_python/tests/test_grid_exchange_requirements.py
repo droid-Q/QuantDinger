@@ -115,6 +115,66 @@ def test_runner_startup_rejects_bitget_one_way(monkeypatch):
     assert "hedge" in msg.lower()
 
 
+def test_runner_startup_places_both_neutral_legs_in_hedge_mode(monkeypatch):
+    class FakeBitgetClient:
+        def get_account_pos_mode(self, **kwargs):
+            return "hedge_mode"
+
+    placed = []
+    monkeypatch.setattr(
+        "app.services.live_trading.position_query.query_exchange_position_size",
+        lambda **kwargs: 0.0,
+    )
+    monkeypatch.setattr("app.services.grid.runner.append_strategy_log", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr("app.services.grid.engine.append_strategy_log", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr("app.services.grid.poller.sync_strategy_grid_orders", lambda _sid: 0)
+
+    with patch("app.services.grid.engine.place_grid_limit_order") as place:
+        place.side_effect = lambda *args, **kwargs: (
+            placed.append(dict(kwargs))
+            or MagicMock(exchange_order_id=f"ex{len(placed)}")
+        )
+        with patch("app.services.grid.engine.GridRestingOrderRepository") as orders_cls:
+            orders = orders_cls.return_value
+            orders.list_open.return_value = []
+            orders.has_open_for_cell.return_value = False
+            orders.insert.return_value = 1
+            with patch("app.services.grid.engine.GridCellRepository") as cells_cls:
+                cells = cells_cls.return_value
+                cells.list_cells.return_value = []
+                runner = GridRestingRunner(
+                    100,
+                    "BTC/USDT",
+                    {
+                        "leverage": 3,
+                        "market_type": "swap",
+                        "initial_capital": 100,
+                        "bot_type": "grid",
+                        "bot_params": {
+                            "upperPrice": 100,
+                            "lowerPrice": 90,
+                            "gridCount": 5,
+                            "amountPerGrid": 5,
+                            "gridDirection": "neutral",
+                            "initialPositionPct": 0,
+                            "maxOpenOrders": 2,
+                        },
+                    },
+                    {"exchange_id": "bitget", "product_type": "USDT-FUTURES"},
+                    user_id=1,
+                    initial_capital=100,
+                    enqueue_market_fn=lambda *args, **kwargs: True,
+                    create_client_fn=lambda: FakeBitgetClient(),
+                )
+                ok, msg = runner.startup(95.0)
+
+    assert ok is True
+    assert msg == ""
+    assert len(placed) == 2
+    assert {row["pos_side"] for row in placed} == {"long", "short"}
+    assert {row["side"] for row in placed} == {"buy", "sell"}
+
+
 def test_fetch_exchange_dual_leg_snapshot(monkeypatch):
     class FakeBitget:
         def get_account_pos_mode(self, **kwargs):

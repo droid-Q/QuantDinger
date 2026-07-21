@@ -15,6 +15,8 @@ The end-user installers live at the repository root:
 | `generate-secret-key.ps1` | Generate a secure `SECRET_KEY` and update `backend_api_python/.env` on Windows. | Keep |
 | `generate-secret-key.sh` | Generate a secure `SECRET_KEY` and update `backend_api_python/.env` on macOS/Linux. | Keep |
 | `bump_version.py` | Update the repo-root `VERSION` and `backend_api_python/VERSION` fallback files. | Keep |
+| `check_docs.py` | Validate documentation structure, local links, code fences, and referenced assets. | Keep |
+| `check_mojibake.py` | Detect common text-encoding corruption in tracked files. | Keep |
 | `check_version.py` | Verify version fallback files stay aligned; used by CI. | Keep |
 
 Removed frontend-only scripts should be recreated or moved in the frontend

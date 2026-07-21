@@ -332,12 +332,14 @@ def get_positions():
 @alpaca_blp.route('/orders', methods=['GET'])
 @login_required
 def get_orders():
-    """Get Alpaca open orders."""
+    """Get Alpaca recent orders or only open orders."""
     try:
         client, err = _require_connected_client()
         if err is not None:
             return err
-        return jsonify({"success": True, "data": client.get_open_orders()})
+        status = str(request.args.get("status") or "all").strip().lower()
+        limit = int(request.args.get("limit") or 100)
+        return jsonify({"success": True, "data": client.get_orders(status=status, limit=limit)})
     except Exception as e:
         logger.error(f"Get orders failed: {e}")
         return jsonify({"success": False, "error": str(e)}), 500

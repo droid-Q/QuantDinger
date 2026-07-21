@@ -129,7 +129,7 @@ def get_trades():
             cur.execute(
                 """
                 SELECT id, strategy_id, symbol, type, price, amount, value,
-                       commission, commission_ccy, profit, close_reason,
+                       commission, commission_ccy, commission_quote, profit, close_reason,
                        matched_entry_price, grid_matched_profit, created_at
                 FROM qd_strategy_trades
                 WHERE strategy_id = ?
@@ -239,7 +239,7 @@ def _build_strategy_equity_curve(user_id: int, strategy_id: int):
         cur = db.cursor()
         cur.execute(
             """
-            SELECT created_at, profit, commission
+            SELECT created_at, profit, commission, commission_quote
             FROM qd_strategy_trades
             WHERE strategy_id = ?
             ORDER BY created_at ASC

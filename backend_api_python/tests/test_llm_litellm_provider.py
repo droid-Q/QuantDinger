@@ -3,7 +3,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from app.services.llm import LLMProvider, LLMService
+from app.services.llm import LLMAPIError, LLMProvider, LLMService
 import app.utils.config_loader as config_loader
 from app.utils.config_loader import clear_config_cache, load_addon_config
 
@@ -93,6 +93,196 @@ def test_atlascloud_openai_compatible_call_skips_response_format(monkeypatch):
     assert "response_format" not in captured["json"]
 
 
+@pytest.mark.parametrize(
+    ("payload", "expected"),
+    [
+        ({"message": "Unsupported parameter: temperature"}, "Unsupported parameter: temperature"),
+        ({"error": {"message": "Model access denied"}}, "Model access denied"),
+        (
+            {
+                "detail": [
+                    {
+                        "loc": ["body", "messages", 0, "content"],
+                        "msg": "Value is not valid",
+                    }
+                ]
+            },
+            "body.messages.0.content: Value is not valid",
+        ),
+    ],
+)
+def test_atlascloud_http_error_preserves_provider_detail(monkeypatch, payload, expected):
+    class FakeResponse:
+        status_code = 400
+        headers = {"x-request-id": "atlas-request-42"}
+        text = ""
+
+        def json(self):
+            return payload
+
+    service = LLMService(provider="atlascloud")
+    monkeypatch.setattr(service, "_llm_post", lambda *args, **kwargs: FakeResponse())
+
+    with pytest.raises(LLMAPIError) as exc_info:
+        service._call_openai_compatible(
+            [{"role": "user", "content": "hello"}],
+            "openai/gpt-5.4",
+            0.4,
+            "atlas-key",
+            "https://api.atlascloud.ai/v1",
+            30,
+            use_json_mode=False,
+        )
+
+    message = str(exc_info.value)
+    assert "AtlasCloud API 400" in message
+    assert "model=openai/gpt-5.4" in message
+    assert "request_id=atlas-request-42" in message
+    assert expected in message
+    assert exc_info.value.status_code == 400
+
+
+def test_atlascloud_http_error_falls_back_to_plain_response_text(monkeypatch):
+    class FakeResponse:
+        status_code = 400
+        headers = {}
+        text = "invalid request body"
+
+        def json(self):
+            raise ValueError("not json")
+
+    service = LLMService(provider="atlascloud")
+    monkeypatch.setattr(service, "_llm_post", lambda *args, **kwargs: FakeResponse())
+
+    with pytest.raises(LLMAPIError, match="invalid request body"):
+        service._call_openai_compatible(
+            [{"role": "user", "content": "hello"}],
+            "deepseek-v3",
+            0.4,
+            "atlas-key",
+            "https://api.atlascloud.ai/v1",
+            30,
+            use_json_mode=False,
+        )
+
+
+def test_atlascloud_uses_configured_model_before_static_fallback(monkeypatch):
+    attempted = []
+    service = LLMService(provider="atlascloud")
+    monkeypatch.setattr(service, "get_api_key", lambda provider=None: "atlas-key")
+    monkeypatch.setattr(
+        service,
+        "get_base_url",
+        lambda provider=None: "https://api.atlascloud.ai/v1",
+    )
+    monkeypatch.setattr(
+        service,
+        "get_default_model",
+        lambda provider=None: "openai/gpt-5.4",
+    )
+
+    def fake_call(messages, model, *args, **kwargs):
+        attempted.append(model)
+        if model == "openai/gpt-5.3-codex":
+            raise LLMAPIError(
+                "AtlasCloud API 400 (model=openai/gpt-5.3-codex): not found",
+                status_code=400,
+            )
+        return "generated code"
+
+    monkeypatch.setattr(service, "_call_openai_compatible", fake_call)
+
+    result = service.call_llm_api(
+        [{"role": "user", "content": "generate a strategy"}],
+        model="openai/gpt-5.3-codex",
+        provider=LLMProvider.ATLASCLOUD,
+        use_json_mode=False,
+        try_alternative_providers=False,
+    )
+
+    assert result == "generated code"
+    assert attempted == ["openai/gpt-5.3-codex", "openai/gpt-5.4"]
+
+
+def test_atlascloud_reports_every_failed_model_attempt(monkeypatch):
+    service = LLMService(provider="atlascloud")
+    monkeypatch.setattr(service, "get_api_key", lambda provider=None: "atlas-key")
+    monkeypatch.setattr(
+        service,
+        "get_base_url",
+        lambda provider=None: "https://api.atlascloud.ai/v1",
+    )
+    monkeypatch.setattr(
+        service,
+        "get_default_model",
+        lambda provider=None: "openai/gpt-5.4",
+    )
+
+    def fake_call(messages, model, *args, **kwargs):
+        raise LLMAPIError(
+            f"AtlasCloud API 400 (model={model}): not found",
+            status_code=400,
+            request_id="atlas-request-99",
+        )
+
+    monkeypatch.setattr(service, "_call_openai_compatible", fake_call)
+
+    with pytest.raises(LLMAPIError) as exc_info:
+        service.call_llm_api(
+            [{"role": "user", "content": "generate a strategy"}],
+            model="openai/gpt-5.3-codex",
+            provider=LLMProvider.ATLASCLOUD,
+            use_json_mode=False,
+            try_alternative_providers=False,
+        )
+
+    message = str(exc_info.value)
+    assert "All model calls failed for atlascloud" in message
+    assert "openai/gpt-5.3-codex" in message
+    assert "openai/gpt-5.4" in message
+    assert "deepseek-v3" not in message
+
+
+def test_explicit_atlascloud_provider_is_not_replaced_by_model_prefix(monkeypatch):
+    monkeypatch.setenv("LLM_PROVIDER", "atlascloud")
+    _reset_config_cache()
+    service = LLMService()
+    captured = {}
+
+    monkeypatch.setattr(
+        service,
+        "get_api_key",
+        lambda provider=None: "configured-key",
+    )
+    monkeypatch.setattr(
+        service,
+        "get_base_url",
+        lambda provider=None: f"https://{(provider or service.provider).value}.example/v1",
+    )
+    monkeypatch.setattr(
+        service,
+        "get_default_model",
+        lambda provider=None: "openai/gpt-5.4",
+    )
+
+    def fake_call(messages, model, temperature, api_key, base_url, timeout, use_json_mode=True):
+        captured.update({"model": model, "api_key": api_key, "base_url": base_url})
+        return "generated code"
+
+    monkeypatch.setattr(service, "_call_openai_compatible", fake_call)
+
+    result = service.call_llm_api(
+        [{"role": "user", "content": "generate a strategy"}],
+        model="deepseek/deepseek-v3",
+        use_json_mode=False,
+        try_alternative_providers=False,
+    )
+
+    assert result == "generated code"
+    assert captured["model"] == "deepseek/deepseek-v3"
+    assert captured["base_url"] == "https://atlascloud.example/v1"
+
+
 def test_litellm_keeps_provider_prefixed_model(monkeypatch):
     monkeypatch.setenv("LLM_PROVIDER", "litellm")
     monkeypatch.setenv("LITELLM_MODEL", "anthropic/claude-sonnet-4-20250514")
@@ -132,6 +322,60 @@ def test_litellm_provider_can_call_without_litellm_api_key(monkeypatch):
     assert out == "ok"
     assert captured["model"] == "openai/gpt-4o-mini"
     assert captured["api_key"] == ""
+
+
+@pytest.mark.parametrize(
+    ("provider", "api_key", "base_url", "expected"),
+    [
+        ("openai", "openai-key", "https://api.openai.com/v1", True),
+        ("openai", "", "https://api.openai.com/v1", False),
+        ("custom", "", "http://127.0.0.1:11434/v1", True),
+        ("custom", "", "", False),
+        ("litellm", "", "", True),
+    ],
+)
+def test_llm_configuration_readiness(monkeypatch, provider, api_key, base_url, expected):
+    service = LLMService(provider=provider)
+    monkeypatch.setattr(service, "get_api_key", lambda selected=None: api_key)
+    monkeypatch.setattr(service, "get_base_url", lambda selected=None: base_url)
+
+    assert service.is_configured() is expected
+
+
+def test_custom_provider_can_call_without_api_key_when_base_url_is_configured(monkeypatch):
+    captured = {}
+    service = LLMService(provider="custom")
+    monkeypatch.setattr(service, "get_api_key", lambda provider=None: "")
+    monkeypatch.setattr(service, "get_base_url", lambda provider=None: "http://127.0.0.1:11434/v1")
+
+    def fake_call(messages, model, temperature, api_key, base_url, timeout, use_json_mode=True):
+        captured.update({"model": model, "api_key": api_key, "base_url": base_url})
+        return "ok"
+
+    monkeypatch.setattr(service, "_call_openai_compatible", fake_call)
+
+    out = service.call_llm_api(
+        [{"role": "user", "content": "hello"}],
+        model="local-model",
+        try_alternative_providers=False,
+        use_json_mode=False,
+    )
+
+    assert out == "ok"
+    assert captured == {
+        "model": "local-model",
+        "api_key": "",
+        "base_url": "http://127.0.0.1:11434/v1",
+    }
+
+
+def test_litellm_stream_can_run_without_litellm_api_key(monkeypatch):
+    service = LLMService(provider="litellm")
+    monkeypatch.setattr(service, "get_api_key", lambda provider=None: "")
+    monkeypatch.setattr(service, "get_base_url", lambda provider=None: "")
+    monkeypatch.setattr(service, "call_llm_api", lambda *args, **kwargs: "streamed")
+
+    assert list(service.stream_llm_api([{"role": "user", "content": "hello"}])) == ["streamed"]
 
 
 def test_litellm_sdk_error_is_wrapped(monkeypatch):

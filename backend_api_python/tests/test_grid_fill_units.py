@@ -54,6 +54,20 @@ def test_gate_filled_size_times_quanto_multiplier():
     assert qty == pytest.approx(0.01)
 
 
+def test_gate_size_minus_left_times_quanto_multiplier():
+    client = MagicMock()
+    client.__class__ = GateUsdtFuturesClient
+    client.get_contract.return_value = {"quanto_multiplier": "0.0001"}
+    qty = extract_grid_fill_base_qty(
+        client,
+        symbol="BTC/USDT",
+        market_type="swap",
+        exchange_config={},
+        data={"status": "open", "size": "3", "left": "1", "fill_price": "65000"},
+    )
+    assert qty == pytest.approx(0.0002)
+
+
 def test_htx_trade_volume_times_contract_size():
     client = MagicMock()
     client.__class__ = HtxClient

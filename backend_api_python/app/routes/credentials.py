@@ -1,13 +1,18 @@
 """
 Exchange credentials vault.
 
-encrypted_config stores Fernet ciphertext derived from SECRET_KEY (see app.utils.credential_crypto).
+encrypted_config stores Fernet ciphertext managed by app.utils.credential_crypto.
 """
 
 import traceback
 import json
 from flask import g, jsonify, request
 from app.openapi.blueprint import HumanBlueprint as Blueprint
+from app.openapi.schemas.high_risk import (
+    CredentialCreateRequestSchema,
+    CredentialCreatedResponseSchema,
+    StrategyIdQuerySchema,
+)
 
 import requests as rq
 
@@ -15,7 +20,13 @@ from app.utils.db import get_db_connection
 from app.utils.logger import get_logger
 from app.utils.auth import login_required
 from app.utils.credential_crypto import encrypt_credential_blob, decrypt_credential_blob
-from app.services.live_trading.factory import exchange_demo_mode_enabled
+from app.services.live_trading.factory import (
+    create_client,
+    exchange_demo_mode_enabled,
+    exchange_market_scope,
+    exchange_trading_environment,
+    validate_exchange_environment,
+)
 from app.services.live_trading.capabilities import supported_crypto_exchange_ids
 
 logger = get_logger(__name__)
@@ -78,11 +89,17 @@ def list_credentials():
         items = []
         for row in rows:
             item = dict(row or {})
+            if str(item.get('exchange_id') or '').strip().lower() not in {*CRYPTO_EXCHANGES, 'ibkr', 'alpaca'}:
+                continue
             item['enable_demo_trading'] = False
+            item['environment'] = 'live'
+            item['market_scope'] = 'both'
             try:
                 plain = decrypt_credential_blob(item.get('encrypted_config'))
                 cfg = json.loads(plain) if plain else {}
                 item['enable_demo_trading'] = exchange_demo_mode_enabled(cfg if isinstance(cfg, dict) else {})
+                item['environment'] = exchange_trading_environment(cfg if isinstance(cfg, dict) else {}, item.get('exchange_id'))
+                item['market_scope'] = exchange_market_scope(cfg if isinstance(cfg, dict) else {})
             except Exception:
                 item['enable_demo_trading'] = False
             item.pop('encrypted_config', None)
@@ -96,6 +113,47 @@ def list_credentials():
 
 
 CRYPTO_EXCHANGES = sorted(supported_crypto_exchange_ids(include_aliases=True))
+
+
+def _crypto_credential_config(data: dict, exchange_id: str) -> dict:
+    api_key = (data.get('api_key') or data.get('apiKey') or '').strip()
+    secret_key = (data.get('secret_key') or data.get('secretKey') or '').strip()
+    if not api_key or not secret_key:
+        raise ValueError('MISSING_EXCHANGE_API_CREDENTIALS')
+    environment = exchange_trading_environment(data, exchange_id)
+    market_scope = exchange_market_scope(data)
+    validate_exchange_environment(exchange_id, environment, market_scope)
+    return {
+        'exchange_id': exchange_id,
+        'api_key': api_key,
+        'secret_key': secret_key,
+        'passphrase': (data.get('passphrase') or '').strip(),
+        'environment': environment,
+        'market_scope': market_scope,
+        'enable_demo_trading': environment != 'live',
+    }
+
+
+def _probe_crypto_credential(config: dict) -> list[str]:
+    scope = exchange_market_scope(config)
+    markets = ['spot', 'swap'] if scope == 'both' else [scope]
+    tested = []
+    for market_type in markets:
+        client = create_client(config, market_type=market_type)
+        if hasattr(client, 'get_account'):
+            client.get_account()
+        elif market_type == 'spot' and hasattr(client, 'get_assets'):
+            client.get_assets()
+        elif hasattr(client, 'get_wallet_balance'):
+            client.get_wallet_balance()
+        elif hasattr(client, 'get_balance'):
+            client.get_balance()
+        elif hasattr(client, 'get_accounts'):
+            client.get_accounts()
+        else:
+            raise ValueError('EXCHANGE_PRIVATE_ACCOUNT_PROBE_UNAVAILABLE')
+        tested.append(market_type)
+    return tested
 
 
 def _egress_ipify(url: str) -> str:
@@ -133,16 +191,64 @@ def get_egress_ip():
     )
 
 
-@credentials_blp.route('/create', methods=['POST'])
+@credentials_blp.route('/test', methods=['POST'])
 @login_required
-def create_credential():
+@credentials_blp.arguments(CredentialCreateRequestSchema, location="json")
+def test_credential(data):
+    """Validate credentials against the selected private trading environment."""
+    try:
+        exchange_id = str(data.get('exchange_id') or '').strip().lower()
+        if exchange_id in CRYPTO_EXCHANGES:
+            config = _crypto_credential_config(data, exchange_id)
+            tested = _probe_crypto_credential(config)
+            return jsonify({
+                'code': 1,
+                'msg': 'CREDENTIAL_CONNECTION_OK',
+                'data': {
+                    'environment': config['environment'],
+                    'market_scope': config['market_scope'],
+                    'tested_markets': tested,
+                },
+            })
+        if exchange_id == 'alpaca':
+            config = {
+                'exchange_id': exchange_id,
+                'api_key': str(data.get('api_key') or data.get('apiKey') or '').strip(),
+                'secret_key': str(data.get('secret_key') or data.get('secretKey') or '').strip(),
+                'base_url': str(data.get('base_url') or data.get('baseUrl') or '').strip(),
+            }
+            client = create_client(config, market_type='spot')
+            if hasattr(client, 'connect') and not client.connect():
+                raise ValueError('CREDENTIAL_CONNECTION_FAILED')
+            return jsonify({'code': 1, 'msg': 'CREDENTIAL_CONNECTION_OK', 'data': {'environment': 'paper' if str(config['api_key']).upper().startswith('PK') else 'live'}})
+        if exchange_id == 'ibkr':
+            config = {
+                'exchange_id': exchange_id,
+                'ibkr_host': str(data.get('ibkr_host') or '127.0.0.1').strip(),
+                'ibkr_port': int(data.get('ibkr_port') or 7497),
+                'ibkr_client_id': int(data.get('ibkr_client_id') or 7),
+                'ibkr_account': str(data.get('ibkr_account') or '').strip(),
+            }
+            client = create_client(config, market_type='spot')
+            if hasattr(client, 'connect') and not client.connect():
+                raise ValueError('CREDENTIAL_CONNECTION_FAILED')
+            return jsonify({'code': 1, 'msg': 'CREDENTIAL_CONNECTION_OK', 'data': None})
+        return jsonify({'code': 0, 'msg': 'UNSUPPORTED_EXCHANGE', 'data': None}), 400
+    except Exception as exc:
+        return jsonify({'code': 0, 'msg': str(exc) or 'CREDENTIAL_CONNECTION_FAILED', 'data': None}), 400
+
+
+@credentials_blp.route('/create', methods=['POST'])
+@credentials_blp.response(200, CredentialCreatedResponseSchema)
+@login_required
+@credentials_blp.arguments(CredentialCreateRequestSchema, location="json")
+def create_credential(data):
     """Create a new credential for the current user.
 
     Supports crypto exchanges, IBKR (US stocks), and Alpaca.
     """
     try:
         user_id = g.user_id
-        data = request.get_json() or {}
         name = (data.get('name') or '').strip()
         exchange_id = (data.get('exchange_id') or '').strip().lower()
 
@@ -224,17 +330,11 @@ def create_credential():
             hint = f"{mt5_login}@{mt5_server}"
         elif exchange_id in CRYPTO_EXCHANGES:
             # Crypto exchanges
-            api_key = (data.get('api_key') or '').strip()
-            secret_key = (data.get('secret_key') or '').strip()
-            if not api_key or not secret_key:
-                return jsonify({'code': 0, 'msg': 'Missing api_key/secret_key', 'data': None}), 400
-            config.update({
-                'api_key': api_key,
-                'secret_key': secret_key,
-                'passphrase': (data.get('passphrase') or '').strip(),
-                'enable_demo_trading': exchange_demo_mode_enabled(data),
-            })
-            hint = _api_key_hint(api_key)
+            try:
+                config = _crypto_credential_config(data, exchange_id)
+            except Exception as exc:
+                return jsonify({'code': 0, 'msg': str(exc), 'data': None}), 400
+            hint = _api_key_hint(config['api_key'])
         else:
             return jsonify({'code': 0, 'msg': f'Unsupported exchange: {exchange_id}', 'data': None}), 400
 
@@ -312,11 +412,12 @@ def update_credential_name():
 
 @credentials_blp.route('/delete', methods=['DELETE'])
 @login_required
-def delete_credential():
+@credentials_blp.arguments(StrategyIdQuerySchema, location="query")
+def delete_credential(query):
     """Delete a credential for the current user."""
     try:
         user_id = g.user_id
-        cred_id = request.args.get('id', type=int)
+        cred_id = query["id"]
         if not cred_id:
             return jsonify({'code': 0, 'msg': 'Missing id', 'data': None}), 400
 
@@ -334,58 +435,6 @@ def delete_credential():
         logger.error(f"delete_credential failed: {str(e)}")
         logger.error(traceback.format_exc())
         return jsonify({'code': 0, 'msg': str(e), 'data': None}), 500
-
-
-@credentials_blp.route('/get', methods=['GET'])
-@login_required
-def get_credential():
-    """
-    Return decrypted credential for form auto-fill.
-    """
-    try:
-        user_id = g.user_id
-        cred_id = request.args.get('id', type=int)
-        if not cred_id:
-            return jsonify({'code': 0, 'msg': 'Missing id', 'data': None}), 400
-
-        with get_db_connection() as db:
-            cur = db.cursor()
-            cur.execute(
-                """
-                SELECT id, user_id, name, exchange_id, encrypted_config, api_key_hint, created_at, updated_at
-                FROM qd_exchange_credentials
-                WHERE id = %s AND user_id = %s
-                """,
-                (cred_id, user_id)
-            )
-            row = cur.fetchone()
-            cur.close()
-
-        if not row:
-            return jsonify({'code': 0, 'msg': 'Not found', 'data': None}), 404
-
-        raw = row.get('encrypted_config')
-        plain = decrypt_credential_blob(raw)
-        decrypted = json.loads(plain) if plain else {}
-        # Ensure exchange_id is present
-        decrypted['exchange_id'] = row.get('exchange_id') or decrypted.get('exchange_id')
-
-        return jsonify({
-            'code': 1,
-            'msg': 'success',
-            'data': {
-                'id': row.get('id'),
-                'name': row.get('name'),
-                'exchange_id': row.get('exchange_id'),
-                'api_key_hint': row.get('api_key_hint'),
-                'config': decrypted
-            }
-        })
-    except Exception as e:
-        logger.error(f"get_credential failed: {str(e)}")
-        logger.error(traceback.format_exc())
-        return jsonify({'code': 0, 'msg': str(e), 'data': None}), 500
-
 
 
 # openapi-compat: legacy import name

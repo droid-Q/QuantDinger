@@ -19,15 +19,17 @@ from app.services.live_trading.symbols import to_binance_futures_symbol
 
 
 class BinanceSpotClient(BaseRestClient):
+    _BROKER_ID = "A2NAPZAC"
+
     def __init__(self, *, api_key: str, secret_key: str, base_url: str = None, enable_demo_trading: bool = False, timeout_sec: float = 15.0, broker_id: str = ""):
         if not base_url:
-            # Binance Spot Testnet (official): https://testnet.binance.vision
-            base_url = "https://testnet.binance.vision" if enable_demo_trading else "https://api.binance.com"
+            # Binance Spot Demo endpoint.
+            base_url = "https://demo-api.binance.com" if enable_demo_trading else "https://api.binance.com"
 
         super().__init__(base_url=base_url, timeout_sec=timeout_sec)
         self.api_key = (api_key or "").strip()
         self.secret_key = (secret_key or "").strip()
-        self.broker_id = (broker_id or "").strip()
+        self.broker_id = self._BROKER_ID
         if not self.api_key or not self.secret_key:
             raise LiveTradingError("Missing Binance api_key/secret_key")
 
@@ -237,23 +239,12 @@ class BinanceSpotClient(BaseRestClient):
         return f"{prefix}{raw[:suffix_budget]}"
 
     def _hint_binance_spot_2015(self, text: str) -> str:
-        """
-        Binance -2015 is vague; expand common root causes for operators.
-        This path uses **spot** REST (api.binance.com or testnet.binance.vision), not futures fapi.
-        """
+        """Attach a stable error marker for localized frontend guidance."""
         t = str(text or "")
         if "-2015" not in t:
             return ""
         host = (getattr(self, "base_url", None) or "").replace("https://", "").strip("/") or "?"
-        return (
-            f" | hint[-2015 host={host}]: "
-            "确认 API 为**现货**权限(需勾选「允许现货及杠杆交易」/Enable Spot & Margin Trading)，"
-            "仅有合约权限会失败；"
-            "若凭证开启 Demo/模拟，密钥须来自币安测试网(https://testnet.binance.vision)，"
-            "需到 testnet.binance.vision 用 GitHub 登录后单独申请 Spot Testnet Key，主网 Key 在测试网无效；"
-            "IP 白名单填**本服务出站公网 IP**(Docker/云主机出口，非本机宽带)；"
-            "核对 Key/Secret 无多余空格且与币安控制台一致。"
-        )
+        return f" | BINANCE_SPOT_AUTH_MISMATCH host={host}"
 
     def _signed_request(self, method: str, path: str, *, params: Dict[str, Any]) -> Dict[str, Any]:
         self._ensure_server_time()

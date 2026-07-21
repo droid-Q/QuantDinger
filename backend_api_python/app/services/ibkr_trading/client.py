@@ -56,7 +56,7 @@ def _ensure_ib_insync():
 class IBKRConfig:
     """IBKR connection configuration."""
     host: str = "127.0.0.1"
-    port: int = 7497  # TWS Live:7496, TWS Paper:7497, Gateway Live:4001, Gateway Paper:4002
+    port: int = 7497  # TWS Live:7496, TWS Paper:7497 (IB defaults), Gateway Live:4001, Gateway Paper:4002
     client_id: int = 1
     readonly: bool = False
     account: str = ""  # Leave empty to auto-select first account
@@ -80,7 +80,7 @@ class IBKRClient:
     Interactive Brokers Trading Client
     
     Usage:
-        config = IBKRConfig(port=7497)  # TWS Paper default
+        config = IBKRConfig(port=7497)  # IB default for TWS Paper
         client = IBKRClient(config)
         
         if client.connect():
@@ -204,6 +204,79 @@ class IBKRClient:
             return False
     
     # ==================== Order Methods ====================
+
+    @staticmethod
+    def _trade_fee_snapshot(trade) -> Dict[str, Any]:
+        fees: Dict[str, float] = {}
+        for fill in list(getattr(trade, "fills", None) or []):
+            report = getattr(fill, "commissionReport", None)
+            if report is None:
+                continue
+            currency = str(getattr(report, "currency", "") or "").strip().upper()
+            try:
+                amount = abs(float(getattr(report, "commission", 0) or 0))
+            except Exception:
+                amount = 0.0
+            if currency and amount > 0:
+                fees[currency] = fees.get(currency, 0.0) + amount
+        if len(fees) == 1:
+            currency, amount = next(iter(fees.items()))
+            return {"commission": amount, "commission_ccy": currency, "fees_by_ccy": fees}
+        return {
+            "commission": 0.0,
+            "commission_ccy": "MIXED" if fees else "",
+            "fees_by_ccy": fees,
+        }
+
+    def _trade_result(self, trade, *, message_prefix: str = "Order") -> OrderResult:
+        order = trade.order
+        order_status = trade.orderStatus
+        status = str(getattr(order_status, "status", "") or "Unknown")
+        rejected = status.lower() in ("cancelled", "apicancelled", "inactive")
+        local_id = int(getattr(order, "orderId", 0) or 0)
+        perm_id = int(getattr(order, "permId", 0) or 0)
+        fee_snapshot = self._trade_fee_snapshot(trade)
+        if not fee_snapshot.get("fees_by_ccy") and float(getattr(order_status, "filled", 0) or 0) > 0:
+            fee_snapshot = self._execution_fee_snapshot(order)
+        raw = {
+            "orderId": local_id,
+            "permId": perm_id,
+            "status": status,
+            "filled": float(getattr(order_status, "filled", 0) or 0),
+            "remaining": float(getattr(order_status, "remaining", 0) or 0),
+            "avgFillPrice": float(getattr(order_status, "avgFillPrice", 0) or 0),
+            **fee_snapshot,
+        }
+        return OrderResult(
+            success=not rejected,
+            order_id=perm_id or local_id,
+            filled=raw["filled"],
+            avg_price=raw["avgFillPrice"],
+            status=status,
+            message=f"{message_prefix} {status}" if rejected else f"{message_prefix} submitted",
+            raw=raw,
+        )
+
+    def _execution_fee_snapshot(self, order) -> Dict[str, Any]:
+        method = getattr(self._ib, "reqExecutions", None)
+        if not callable(method):
+            return {"commission": 0.0, "commission_ccy": "", "fees_by_ccy": {}}
+        local_id = str(getattr(order, "orderId", "") or "")
+        perm_id = str(getattr(order, "permId", "") or "")
+        try:
+            fills = list(method() or [])
+        except Exception:
+            return {"commission": 0.0, "commission_ccy": "", "fees_by_ccy": {}}
+        matched = []
+        for fill in fills:
+            execution = getattr(fill, "execution", None)
+            candidate_ids = {
+                str(getattr(execution, "orderId", "") or ""),
+                str(getattr(execution, "permId", "") or ""),
+            }
+            if (local_id and local_id in candidate_ids) or (perm_id and perm_id in candidate_ids):
+                matched.append(fill)
+        return self._trade_fee_snapshot(type("ExecutionTrade", (), {"fills": matched})())
     
     def place_market_order(
         self,
@@ -246,23 +319,7 @@ class IBKRClient:
             # Wait for order status update
             self._ib.sleep(2)
             
-            status = trade.orderStatus.status
-            rejected = status in ("Cancelled", "ApiCancelled", "Inactive")
-            
-            return OrderResult(
-                success=not rejected,
-                order_id=trade.order.orderId,
-                filled=float(trade.orderStatus.filled or 0),
-                avg_price=float(trade.orderStatus.avgFillPrice or 0),
-                status=status,
-                message=f"Order {status}" if rejected else "Order submitted",
-                raw={
-                    "orderId": trade.order.orderId,
-                    "status": status,
-                    "filled": float(trade.orderStatus.filled or 0),
-                    "remaining": float(trade.orderStatus.remaining or 0),
-                }
-            )
+            return self._trade_result(trade)
             
         except Exception as e:
             logger.error(f"Order failed: {e}")
@@ -313,22 +370,9 @@ class IBKRClient:
             trade = self._ib.placeOrder(contract, order)
             self._ib.sleep(1)
             
-            status = trade.orderStatus.status
-            rejected = status in ("Cancelled", "ApiCancelled", "Inactive")
-            
-            return OrderResult(
-                success=not rejected,
-                order_id=trade.order.orderId,
-                filled=float(trade.orderStatus.filled or 0),
-                avg_price=float(trade.orderStatus.avgFillPrice or 0),
-                status=status,
-                message=f"Limit order {status}" if rejected else "Limit order submitted",
-                raw={
-                    "orderId": trade.order.orderId,
-                    "status": status,
-                    "limitPrice": price,
-                }
-            )
+            result = self._trade_result(trade, message_prefix="Limit order")
+            result.raw["limitPrice"] = float(price)
+            return result
             
         except Exception as e:
             logger.error(f"Limit order failed: {e}")
@@ -336,6 +380,79 @@ class IBKRClient:
                 success=False,
                 message=str(e)
             )
+
+    def place_bracket_order(
+        self,
+        symbol: str,
+        side: str,
+        quantity: float,
+        *,
+        take_profit_price: float = 0.0,
+        stop_loss_price: float = 0.0,
+        limit_price: float = 0.0,
+        market_type: str = "USStock",
+    ) -> OrderResult:
+        """Submit a parent order and attached take-profit/stop-loss orders atomically."""
+        try:
+            self._ensure_connected()
+            _ensure_ib_insync()
+            contract = self._create_contract(symbol, market_type)
+            if not self._qualify_contract(contract):
+                return OrderResult(success=False, message=f"Invalid contract: {symbol}")
+
+            take_profit_price = float(take_profit_price or 0.0)
+            stop_loss_price = float(stop_loss_price or 0.0)
+            if take_profit_price <= 0 and stop_loss_price <= 0:
+                return OrderResult(success=False, message="Bracket order requires a protection price")
+
+            action = "BUY" if side.lower() == "buy" else "SELL"
+            exit_action = "SELL" if action == "BUY" else "BUY"
+            parent = (
+                ib_insync.LimitOrder(action, quantity, float(limit_price), account=self._account)
+                if float(limit_price or 0.0) > 0
+                else ib_insync.MarketOrder(action, quantity, account=self._account)
+            )
+            parent.orderId = self._ib.client.getReqId()
+            parent.transmit = False
+
+            children = []
+            if take_profit_price > 0:
+                child = ib_insync.LimitOrder(
+                    exit_action,
+                    quantity,
+                    take_profit_price,
+                    account=self._account,
+                    parentId=parent.orderId,
+                    tif="GTC",
+                    transmit=False,
+                )
+                children.append(child)
+            if stop_loss_price > 0:
+                child = ib_insync.StopOrder(
+                    exit_action,
+                    quantity,
+                    stop_loss_price,
+                    account=self._account,
+                    parentId=parent.orderId,
+                    tif="GTC",
+                    transmit=False,
+                )
+                children.append(child)
+            children[-1].transmit = True
+
+            trade = self._ib.placeOrder(contract, parent)
+            for child in children:
+                self._ib.placeOrder(contract, child)
+                self._ib.sleep(0.05)
+            self._ib.sleep(2)
+            result = self._trade_result(trade, message_prefix="Bracket order")
+            result.raw["childOrderIds"] = [int(getattr(child, "orderId", 0) or 0) for child in children]
+            result.raw["takeProfitPrice"] = take_profit_price
+            result.raw["stopLossPrice"] = stop_loss_price
+            return result
+        except Exception as e:
+            logger.error(f"Bracket order failed: {e}")
+            return OrderResult(success=False, message=str(e))
     
     def cancel_order(self, order_id: int) -> bool:
         """
@@ -350,8 +467,15 @@ class IBKRClient:
         try:
             self._ensure_connected()
             
-            for trade in self._ib.openTrades():
-                if trade.order.orderId == order_id:
+            request_all = getattr(self._ib, "reqAllOpenOrders", None)
+            trades = list(request_all() or []) if callable(request_all) else list(self._ib.openTrades() or [])
+            requested = str(order_id or "").strip()
+            for trade in trades:
+                candidate_ids = {
+                    str(getattr(trade.order, "orderId", "") or ""),
+                    str(getattr(trade.order, "permId", "") or ""),
+                }
+                if requested in candidate_ids:
                     self._ib.cancelOrder(trade.order)
                     logger.info(f"Order {order_id} cancelled")
                     return True
@@ -362,7 +486,50 @@ class IBKRClient:
         except Exception as e:
             logger.error(f"Cancel order failed: {e}")
             return False
-    
+
+    def get_order_status(self, order_id: int) -> OrderResult:
+        """Return the latest known status for an open or completed order."""
+        try:
+            self._ensure_connected()
+            requested = str(order_id or "").strip()
+            if not requested:
+                return OrderResult(success=False, message="Missing order_id")
+
+            trades = []
+            for method_name, args in (
+                ("reqAllOpenOrders", ()),
+                ("openTrades", ()),
+                ("trades", ()),
+                ("reqCompletedOrders", (False,)),
+            ):
+                method = getattr(self._ib, method_name, None)
+                if not callable(method):
+                    continue
+                try:
+                    trades.extend(list(method(*args) or []))
+                except Exception:
+                    continue
+
+            for trade in trades:
+                order = getattr(trade, "order", None)
+                order_status = getattr(trade, "orderStatus", None)
+                candidate_ids = {
+                    str(getattr(order, "orderId", "") or ""),
+                    str(getattr(order, "permId", "") or ""),
+                }
+                if requested not in candidate_ids:
+                    continue
+                return self._trade_result(trade)
+            return OrderResult(
+                success=True,
+                order_id=order_id,
+                status="Unknown",
+                message="Order not found in the current IBKR session",
+            )
+        except Exception as e:
+            logger.error(f"Get order status failed: {e}")
+            return OrderResult(success=False, order_id=order_id, message=str(e))
+
     # ==================== Query Methods ====================
     
     def get_account_summary(self) -> Dict[str, Any]:
@@ -437,7 +604,8 @@ class IBKRClient:
         try:
             self._ensure_connected()
             
-            trades = self._ib.openTrades()
+            request_all = getattr(self._ib, "reqAllOpenOrders", None)
+            trades = list(request_all() or []) if callable(request_all) else list(self._ib.openTrades() or [])
             result = []
             
             for trade in trades:
@@ -447,6 +615,7 @@ class IBKRClient:
                 
                 result.append({
                     "orderId": order.orderId,
+                    "permId": getattr(order, "permId", 0),
                     "symbol": contract.symbol,
                     "action": order.action,
                     "quantity": float(order.totalQuantity),

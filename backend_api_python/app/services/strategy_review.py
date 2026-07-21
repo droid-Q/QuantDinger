@@ -131,7 +131,6 @@ class StrategyReviewService:
             "strategy": {
                 "id": int(strategy_id),
                 "name": strategy.get("strategy_name") or strategy.get("name") or str(strategy_id),
-                "mode": strategy.get("strategy_mode") or "",
                 "type": strategy.get("strategy_type") or strategy.get("type") or "",
                 "status": strategy.get("status") or "",
                 "execution_mode": strategy.get("execution_mode") or "",
@@ -330,7 +329,7 @@ class StrategyReviewService:
             cur.execute(
                 """
                 SELECT id, strategy_id, symbol, type, price, amount, value,
-                       commission, commission_ccy, profit, close_reason,
+                       commission, commission_ccy, commission_quote, profit, close_reason,
                        matched_entry_price, grid_matched_profit, created_at
                 FROM qd_strategy_trades
                 WHERE strategy_id = ?

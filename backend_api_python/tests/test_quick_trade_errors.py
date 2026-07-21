@@ -42,6 +42,21 @@ def test_merge_balance_leg_errors_prefers_first_leg_error():
     assert meta["error"] == meta["errors"][0]
 
 
+def test_okx_spot_account_mode_error_is_actionable():
+    meta = exchange_error_user_message(
+        exchange_id="okx",
+        err="OKX_SWAP_ACCOUNT_MODE_REQUIRED",
+    )
+
+    assert meta["hint_key"] == "quickTrade.errorHints.okxAccountMode"
+
+
+def test_http_451_is_reported_as_a_region_restriction():
+    assert (
+        parse_trade_error_hint("HTTP 451 Service unavailable from a restricted location")
+        == "quickTrade.errorHints.regionRestricted"
+    )
+
 def test_symbols_match_exchange_native_suffixes():
     assert symbols_match("ETH/USDT", "ETH-USDT-SWAP")
     assert symbols_match("BTC/USDT", "BTC_USDT_PERP")

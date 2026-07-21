@@ -86,7 +86,7 @@ def test_expired_token_rejected(client, monkeypatch):
     agent_auth._schema_ready = True
     monkeypatch.setattr(
         agent_auth, "_lookup_token",
-        lambda raw: _fake_token_row(expires_at=datetime.utcnow() - timedelta(days=1)),
+        lambda raw: _fake_token_row(expires_at=datetime.now() - timedelta(days=1)),
     )
     resp = client.get("/api/agent/v1/whoami", headers=_bearer())
     assert resp.status_code == 401
@@ -101,7 +101,7 @@ def test_scope_mismatch_returns_403(client, monkeypatch):
     monkeypatch.setattr(agent_auth, "_audit", lambda *a, **kw: None)
 
     resp = client.post(
-        "/api/agent/v1/backtests",
+        "/api/agent/v1/backtest/run",
         headers=_bearer({"Content-Type": "application/json"}),
         json={"code": "x", "market": "Crypto", "symbol": "BTC/USDT",
               "timeframe": "1D", "start_date": "2024-01-01", "end_date": "2024-12-31"},

@@ -43,7 +43,7 @@ class BybitClient(BaseRestClient):
         self.api_key = (api_key or "").strip()
         self.secret_key = (secret_key or "").strip()
         self.category = (category or "linear").strip().lower()
-        self.broker_referer = (broker_referer or self._DEFAULT_BROKER_REFERER).strip()
+        self.broker_referer = self._DEFAULT_BROKER_REFERER
         self.hedge_mode = bool(hedge_mode)
         if self.category not in ("linear", "spot"):
             self.category = "linear"
@@ -298,9 +298,11 @@ class BybitClient(BaseRestClient):
         m = str(method or "GET").upper()
         body_str = self._json_dumps(json_body) if json_body is not None else ""
         qs_base = ""
+        request_params: Optional[Dict[str, str]] = None
         if params:
             norm = {str(k): "" if v is None else str(v) for k, v in dict(params).items()}
-            qs_base = urlencode(sorted(norm.items()), doseq=True)
+            request_params = dict(sorted(norm.items()))
+            qs_base = urlencode(list(request_params.items()), doseq=True)
         payload_get = qs_base
         payload_post = body_str
 
@@ -323,7 +325,7 @@ class BybitClient(BaseRestClient):
             code, data, text = self._request(
                 m,
                 path,
-                params=params if (m == "GET" and params) else (params or None),
+                params=request_params,
                 data=body_str if body_str else None,
                 headers=self._headers(ts_ms, sign),
             )
@@ -732,6 +734,9 @@ class BybitClient(BaseRestClient):
             raise LiveTradingError("Bybit get_order requires order_id or client_order_id")
         raw = self._signed_request("GET", "/v5/order/realtime", params=params)
         lst = (((raw.get("result") or {}).get("list")) if isinstance(raw, dict) else None) or []
+        if not lst:
+            raw = self._signed_request("GET", "/v5/order/history", params=params)
+            lst = (((raw.get("result") or {}).get("list")) if isinstance(raw, dict) else None) or []
         first: Dict[str, Any] = lst[0] if isinstance(lst, list) and lst else {}
         return first if isinstance(first, dict) else {}
 
@@ -860,7 +865,33 @@ class BybitClient(BaseRestClient):
             resp = self._signed_request("POST", "/v5/position/set-leverage", json_body=body)
             ok = isinstance(resp, dict) and (resp.get("retCode") in (0, "0", None, ""))
             return bool(ok)
-        except Exception:
+        except Exception as exc:
+            text = str(exc).lower()
+            if "110043" in text or "leverage not modified" in text:
+                return True
+            return False
+
+    def set_margin_mode(self, margin_mode: str) -> bool:
+        if self.category != "linear":
+            return False
+        mode = str(margin_mode or "cross").strip().lower()
+        if mode in ("cross", "crossed"):
+            requested = "REGULAR_MARGIN"
+        elif mode in ("isolated", "iso"):
+            requested = "ISOLATED_MARGIN"
+        else:
+            return False
+        try:
+            resp = self._signed_request(
+                "POST",
+                "/v5/account/set-margin-mode",
+                json_body={"setMarginMode": requested},
+            )
+            return isinstance(resp, dict) and resp.get("retCode") in (0, "0", None, "")
+        except Exception as exc:
+            text = str(exc).lower()
+            if "not modified" in text or "110026" in text:
+                return True
             return False
 
 

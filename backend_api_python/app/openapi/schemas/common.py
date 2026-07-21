@@ -59,7 +59,7 @@ class ApiInfoSchema(Schema):
     """GET / — API identity payload."""
 
     name = fields.String(metadata={"example": "QuantDinger Python API"})
-    version = fields.String(metadata={"example": "3.0.23"})
+    version = fields.String(metadata={"example": "5.0.1"})
     status = fields.String(metadata={"example": "running"})
     timestamp = fields.DateTime(format="iso")
 
@@ -69,3 +69,12 @@ class HealthStatusSchema(Schema):
 
     status = fields.String(metadata={"example": "healthy"})
     timestamp = fields.DateTime(format="iso")
+    role = fields.String(metadata={"example": "api"})
+
+
+class ReadinessStatusSchema(HealthStatusSchema):
+    checks = fields.Dict(keys=fields.String(), values=fields.Boolean())
+
+
+class WorkerHealthSchema(HealthStatusSchema):
+    workers = fields.List(fields.Dict())

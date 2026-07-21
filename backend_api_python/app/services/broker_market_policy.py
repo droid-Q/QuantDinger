@@ -35,14 +35,7 @@ def _build_broker_markets() -> Dict[str, Dict[str, Set[str]]]:
     matrix: Dict[str, Dict[str, Set[str]]] = {
         # US stocks via Interactive Brokers (TWS/Gateway, local desktop only)
         "ibkr": {"USStock": {"spot"}},
-        # Alpaca: REST broker for US equities + crypto.
-        # Crypto is *spot only* on Alpaca - they have no perpetual / margin
-        # crypto product, so a 'swap' market_type is impossible regardless of
-        # what we implement.
-        "alpaca": {
-            "USStock": {"spot"},
-            "Crypto": {"spot"},
-        },
+        "alpaca": {"USStock": {"spot"}},
         # MT5/CPT Markets is exposed as a Forex broker account in the UI.
         # Symbol availability is broker-account specific, so exact contract
         # validation happens at order_check/order_send time.
@@ -101,6 +94,8 @@ def _norm_market_type(value: Optional[str]) -> str:
     raw = (value or "").strip().lower()
     if raw in ("futures", "future", "perp", "perpetual"):
         return "swap"
+    if raw in ("usstock", "us_stock", "stock", "stocks", "equity", "cash"):
+        return "spot"
     return raw
 
 
@@ -226,14 +221,6 @@ def validate_strategy_config(
     if mc and mt:
         allowed_mts = allowed_market_types(ex, mc)
         if mt not in allowed_mts:
-            # Special-case the most common confusion so the error is helpful.
-            if ex == "alpaca" and mc == "Crypto" and mt == "swap":
-                raise ValueError(
-                    "Alpaca crypto desk is spot-only (no perpetual / margin "
-                    "product). Got market_type='swap'. Set market_type='spot', "
-                    "or to trade crypto perpetuals use Binance/OKX/Bybit/"
-                    "Bitget with market_type='swap'."
-                )
             raise ValueError(
                 f"{ex.upper()} + {mc} does not support market_type='{mt}'. "
                 f"Allowed: {sorted(allowed_mts)}."

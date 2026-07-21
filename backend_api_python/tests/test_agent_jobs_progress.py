@@ -23,6 +23,7 @@ def _stub_persistence(monkeypatch):
     monkeypatch.setattr(agent_jobs, "_set_status", lambda *a, **kw: None)
     monkeypatch.setattr(agent_jobs, "_set_result", lambda *a, **kw: None)
     monkeypatch.setattr(agent_jobs, "_set_failure", lambda *a, **kw: None)
+    monkeypatch.setattr(agent_jobs, "get_job_for_worker", lambda *_: None)
 
     def _fake_publish(job_id, event, *, terminal=False):
         # Re-implement publish without DB persistence.

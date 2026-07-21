@@ -2,7 +2,7 @@
 Factory for direct exchange clients.
 
 Supports:
-- Crypto exchanges: Binance, OKX, Bitget, Bybit, Coinbase, Kraken, Gate, HTX
+- Crypto exchanges: Binance, OKX, Bitget, Bybit, Gate, HTX
 - Traditional brokers: Interactive Brokers (IBKR) and Alpaca
 """
 
@@ -21,9 +21,6 @@ from app.services.live_trading.okx import OkxClient
 from app.services.live_trading.bitget import BitgetMixClient
 from app.services.live_trading.bitget_spot import BitgetSpotClient
 from app.services.live_trading.bybit import BybitClient
-from app.services.live_trading.coinbase_exchange import CoinbaseExchangeClient
-from app.services.live_trading.kraken import KrakenClient
-from app.services.live_trading.kraken_futures import KrakenFuturesClient
 from app.services.live_trading.gate import GateSpotClient, GateUsdtFuturesClient
 from app.services.live_trading.htx import HtxClient
 
@@ -67,11 +64,95 @@ EXCHANGE_CONFIG_ROOT_OVERLAY_KEYS = (
     "network",
     "environment",
     "env",
+    "market_scope",
+    "marketScope",
     "base_url",
     "baseUrl",
     "futures_base_url",
     "futuresBaseUrl",
 )
+
+
+def _truthy(value: Any) -> bool:
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        return int(value) == 1
+    return str(value or "").strip().lower() in ("true", "1", "yes", "on")
+
+
+def exchange_trading_environment(cfg: Dict[str, Any], exchange_id: str = "") -> str:
+    """Return the canonical credential environment: live, demo, or testnet."""
+    if not isinstance(cfg, dict):
+        return "live"
+    ex = str(exchange_id or cfg.get("exchange_id") or cfg.get("exchangeId") or "").strip().lower()
+    raw = str(cfg.get("environment") or cfg.get("network") or cfg.get("env") or "").strip().lower()
+    if raw in ("live", "mainnet", "production", "prod", "real"):
+        environment = "live"
+    elif raw in ("demo", "paper", "simulate", "simulation", "simulated"):
+        environment = "demo"
+    elif raw in ("testnet", "sandbox", "test"):
+        environment = "testnet"
+    elif raw:
+        return raw
+    else:
+        legacy_demo = any(
+            _truthy(cfg.get(key))
+            for key in (
+                "enable_demo_trading",
+                "enableDemoTrading",
+                "simulated_trading",
+                "simulatedTrading",
+                "use_testnet",
+                "is_testnet",
+                "isTestnet",
+                "sandbox",
+                "paper_trading",
+                "paperTrading",
+                "paper",
+                "is_paper",
+                "demo",
+                "testnet",
+            )
+        )
+        if not legacy_demo:
+            return "live"
+        environment = "testnet" if ex == "gate" else "demo"
+
+    if ex == "gate" and environment == "demo":
+        return "testnet"
+    if ex in ("okx", "bitget") and environment == "testnet":
+        return "demo"
+    return environment
+
+
+def exchange_market_scope(cfg: Dict[str, Any]) -> str:
+    raw = str(cfg.get("market_scope") or cfg.get("marketScope") or "both").strip().lower()
+    if raw in ("future", "futures", "perp", "perpetual", "contract", "contracts"):
+        return "swap"
+    if raw in ("spot", "swap", "both"):
+        return raw
+    return raw
+
+
+def validate_exchange_environment(exchange_id: str, environment: str, market_scope: str = "both") -> None:
+    ex = str(exchange_id or "").strip().lower()
+    env = str(environment or "live").strip().lower()
+    scope = str(market_scope or "both").strip().lower()
+    allowed = {
+        "binance": {"live", "demo"},
+        "okx": {"live", "demo"},
+        "bitget": {"live", "demo"},
+        "bybit": {"live", "demo"},
+        "gate": {"live", "testnet"},
+        "htx": {"live"},
+    }
+    if env not in allowed.get(ex, {"live"}):
+        if ex == "htx" and env != "live":
+            raise LiveTradingError("HTX_DEMO_NOT_SUPPORTED")
+        raise LiveTradingError("UNSUPPORTED_TRADING_ENVIRONMENT")
+    if scope not in ("spot", "swap", "both"):
+        raise LiveTradingError("INVALID_CREDENTIAL_MARKET_SCOPE")
 
 
 def merge_root_exchange_config_overlay(*, root: Dict[str, Any], exchange_config: Dict[str, Any]) -> Dict[str, Any]:
@@ -85,7 +166,7 @@ def merge_root_exchange_config_overlay(*, root: Dict[str, Any], exchange_config:
     return out
 
 
-def exchange_demo_mode_enabled(cfg: Dict[str, Any]) -> bool:
+def _legacy_exchange_demo_mode_enabled(cfg: Dict[str, Any]) -> bool:
     """
     Whether config indicates demo / testnet / simulated / paper mode for live-trading clients.
 
@@ -124,6 +205,10 @@ def exchange_demo_mode_enabled(cfg: Dict[str, Any]) -> bool:
     return False
 
 
+def exchange_demo_mode_enabled(cfg: Dict[str, Any]) -> bool:
+    return exchange_trading_environment(cfg) != "live"
+
+
 def _demo_enabled(cfg: Dict[str, Any]) -> bool:
     return exchange_demo_mode_enabled(cfg)
 
@@ -140,61 +225,61 @@ def create_client(exchange_config: Dict[str, Any], *, market_type: str = "swap")
     if mt in ("futures", "future", "perp", "perpetual"):
         mt = "swap"
 
-    is_demo = _demo_enabled(exchange_config)
+    environment = exchange_trading_environment(exchange_config, exchange_id)
+    if environment not in ("live", "demo", "testnet"):
+        raise LiveTradingError("UNSUPPORTED_TRADING_ENVIRONMENT")
+    is_demo = environment != "live"
+    market_scope = exchange_market_scope(exchange_config)
+    validate_exchange_environment(exchange_id, environment, market_scope)
+    if market_scope != "both" and market_scope != mt:
+        raise LiveTradingError("CREDENTIAL_MARKET_SCOPE_MISMATCH")
 
     if exchange_id == "binance":
-        spot_broker_id = _get(exchange_config, "spot_broker_id", "spotBrokerId", "broker_id", "brokerId") or "A2NAPZAC"
-        futures_broker_id = _get(exchange_config, "futures_broker_id", "futuresBrokerId", "broker_id", "brokerId") or "HBpUbQjT"
         if mt == "spot":
-            # Binance Spot Testnet: https://testnet.binance.vision (official)
-            default_url = "https://testnet.binance.vision" if is_demo else "https://api.binance.com"
-            base_url = _get(exchange_config, "base_url", "baseUrl") or default_url
-            return BinanceSpotClient(api_key=api_key, secret_key=secret_key, base_url=base_url, enable_demo_trading=is_demo, broker_id=spot_broker_id)
+            default_url = "https://demo-api.binance.com" if is_demo else "https://api.binance.com"
+            base_url = default_url if is_demo else (_get(exchange_config, "base_url", "baseUrl") or default_url)
+            return BinanceSpotClient(api_key=api_key, secret_key=secret_key, base_url=base_url, enable_demo_trading=is_demo)
         # Default to USDT-M futures
-        # Binance Futures Testnet: https://testnet.binancefuture.com (official)
-        default_url = "https://testnet.binancefuture.com" if is_demo else "https://fapi.binance.com"
-        base_url = _get(exchange_config, "base_url", "baseUrl") or default_url
-        return BinanceFuturesClient(api_key=api_key, secret_key=secret_key, base_url=base_url, enable_demo_trading=is_demo, broker_id=futures_broker_id)
+        # Binance USD-M Futures demo REST endpoint.
+        default_url = "https://demo-fapi.binance.com" if is_demo else "https://fapi.binance.com"
+        base_url = default_url if is_demo else (_get(exchange_config, "base_url", "baseUrl") or default_url)
+        return BinanceFuturesClient(api_key=api_key, secret_key=secret_key, base_url=base_url, enable_demo_trading=is_demo)
     if exchange_id == "okx":
-        base_url = _get(exchange_config, "base_url", "baseUrl") or "https://www.okx.com"
-        broker_code = "56fa80b0ce8cBCDE"
+        base_url = "https://openapi.okx.com" if is_demo else (_get(exchange_config, "base_url", "baseUrl") or "https://openapi.okx.com")
         return OkxClient(
             api_key=api_key,
             secret_key=secret_key,
             passphrase=passphrase,
             base_url=base_url,
-            broker_code=broker_code,
             simulated_trading=is_demo,
         )
     if exchange_id == "bitget":
         # Bitget simulated trading uses the same REST host; keys must be created in Bitget demo trading.
         base_url = _get(exchange_config, "base_url", "baseUrl") or "https://api.bitget.com"
         if mt == "spot":
-            channel_api_code = _get(exchange_config, "channel_api_code", "channelApiCode") or "qvz9x"
             return BitgetSpotClient(
                 api_key=api_key,
                 secret_key=secret_key,
                 passphrase=passphrase,
                 base_url=base_url,
-                channel_api_code=channel_api_code,
                 simulated_trading=is_demo,
             )
-        channel_api_code = _get(exchange_config, "channel_api_code", "channelApiCode") or "qvz9x"
         return BitgetMixClient(
             api_key=api_key,
             secret_key=secret_key,
             passphrase=passphrase,
             base_url=base_url,
-            channel_api_code=channel_api_code,
             simulated_trading=is_demo,
         )
 
     if exchange_id == "bybit":
-        default_bybit = "https://api-testnet.bybit.com" if is_demo else "https://api.bybit.com"
-        base_url = _get(exchange_config, "base_url", "baseUrl") or default_bybit
+        if environment == "demo":
+            default_bybit = "https://api-demo.bybit.com"
+        else:
+            default_bybit = "https://api.bybit.com"
+        base_url = default_bybit if is_demo else (_get(exchange_config, "base_url", "baseUrl") or default_bybit)
         category = "spot" if mt == "spot" else "linear"
         recv_window_ms = int(exchange_config.get("recv_window_ms") or exchange_config.get("recvWindow") or 12000)
-        broker_referer = _get(exchange_config, "bybit_referer", "broker_referer", "brokerReferer") or "Ri001020"
         hedge_mode_raw = exchange_config.get("hedge_mode")
         if hedge_mode_raw is None:
             hedge_mode_raw = exchange_config.get("hedgeMode")
@@ -211,49 +296,28 @@ def create_client(exchange_config: Dict[str, Any], *, market_type: str = "swap")
             base_url=base_url,
             category=category,
             recv_window_ms=recv_window_ms,
-            broker_referer=broker_referer,
             hedge_mode=hedge_mode,
         )
 
-    if exchange_id in ("coinbaseexchange", "coinbase_exchange"):
-        default_cb = "https://api-public.sandbox.exchange.coinbase.com" if is_demo else "https://api.exchange.coinbase.com"
-        base_url = _get(exchange_config, "base_url", "baseUrl") or default_cb
-        if mt != "spot":
-            raise LiveTradingError("CoinbaseExchange only supports spot market_type in this project")
-        return CoinbaseExchangeClient(api_key=api_key, secret_key=secret_key, passphrase=passphrase, base_url=base_url)
-
-    if exchange_id == "kraken":
-        base_url = _get(exchange_config, "base_url", "baseUrl") or "https://api.kraken.com"
-        if mt == "spot":
-            # Kraken spot REST has no separate public sandbox URL; use demo keys on production API if offered by Kraken.
-            return KrakenClient(api_key=api_key, secret_key=secret_key, base_url=base_url)
-        fut_default = "https://demo-futures.kraken.com" if is_demo else "https://futures.kraken.com"
-        fut_url = _get(exchange_config, "futures_base_url", "futuresBaseUrl") or fut_default
-        return KrakenFuturesClient(api_key=api_key, secret_key=secret_key, base_url=fut_url)
-
     if exchange_id == "gate":
-        gate_channel_id = _get(exchange_config, "gate_channel_id", "gateChannelId") or "dinger"
         if mt == "spot":
-            default_gate = "https://api-testnet.gateio.ws" if is_demo else "https://api.gateio.ws"
-            base_url = _get(exchange_config, "base_url", "baseUrl") or default_gate
-            return GateSpotClient(api_key=api_key, secret_key=secret_key, base_url=base_url, channel_id=gate_channel_id)
-        default_fut = "https://fx-api-testnet.gateio.ws" if is_demo else "https://fx-api.gateio.ws"
-        base_url = _get(exchange_config, "base_url", "baseUrl") or default_fut
-        return GateUsdtFuturesClient(api_key=api_key, secret_key=secret_key, base_url=base_url, channel_id=gate_channel_id)
+            default_gate = "https://api-testnet.gateapi.io" if is_demo else "https://api.gateio.ws"
+            base_url = default_gate if is_demo else (_get(exchange_config, "base_url", "baseUrl") or default_gate)
+            return GateSpotClient(api_key=api_key, secret_key=secret_key, base_url=base_url)
+        default_fut = "https://api-testnet.gateapi.io" if is_demo else "https://fx-api.gateio.ws"
+        base_url = default_fut if is_demo else (_get(exchange_config, "base_url", "baseUrl") or default_fut)
+        return GateUsdtFuturesClient(api_key=api_key, secret_key=secret_key, base_url=base_url)
 
     if exchange_id == "htx":
-        if is_demo and not (_get(exchange_config, "base_url", "baseUrl") or _get(exchange_config, "futures_base_url", "futuresBaseUrl")):
-            raise LiveTradingError("HTX demo/testnet is not configured in this project yet. Please disable demo mode or provide explicit testnet base_url/futures_base_url.")
         spot_url = _get(exchange_config, "base_url", "baseUrl") or "https://api.htx.com"
         futures_url = _get(exchange_config, "futures_base_url", "futuresBaseUrl") or "https://api.hbdm.com"
-        broker_id = _get(exchange_config, "broker_id", "brokerId") or "AA7b890547"
         return HtxClient(
             api_key=api_key,
             secret_key=secret_key,
             base_url=spot_url,
             futures_base_url=futures_url,
             market_type=mt,
-            broker_id=broker_id,
+            margin_mode=_get(exchange_config, "margin_mode", "marginMode") or "cross",
         )
 
     # Traditional brokers (IBKR for US stocks only)
@@ -279,7 +343,7 @@ def create_ibkr_client(exchange_config: Dict[str, Any]):
 
     exchange_config should contain:
     - ibkr_host: TWS/Gateway host (default: 127.0.0.1)
-    - ibkr_port: TWS/Gateway port (default: 7497 = TWS Paper; TWS Live default is 7496)
+    - ibkr_port: TWS/Gateway port (default 7497 = TWS Paper per IB; Live TWS default 7496)
     - ibkr_client_id: Client ID (see below — must not collide with /api/ibkr UI)
     - ibkr_account: Account ID (optional, auto-select if empty)
 

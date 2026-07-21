@@ -13,6 +13,7 @@ import hashlib
 import hmac
 import datetime
 import logging
+import os
 import time
 from decimal import Decimal, ROUND_DOWN
 from typing import Any, Dict, List, Optional, Tuple
@@ -26,6 +27,9 @@ logger = logging.getLogger(__name__)
 
 
 class HtxClient(BaseRestClient):
+    _BROKER_ID = "AA7b890547"
+    _SPOT_SOURCE = "spot-api"
+
     def __init__(
         self,
         *,
@@ -36,6 +40,8 @@ class HtxClient(BaseRestClient):
         timeout_sec: float = 15.0,
         market_type: str = "swap",
         broker_id: str = "",
+        spot_source: str = "spot-api",
+        margin_mode: str = "cross",
     ):
         chosen_base = futures_base_url if str(market_type or "").strip().lower() == "swap" else base_url
         super().__init__(base_url=chosen_base, timeout_sec=timeout_sec)
@@ -44,7 +50,13 @@ class HtxClient(BaseRestClient):
         self.api_key = (api_key or "").strip()
         self.secret_key = (secret_key or "").strip()
         self.market_type = (market_type or "swap").strip().lower()
-        self.broker_id = (broker_id or "").strip()
+        self.broker_id = self._BROKER_ID
+        self.spot_source = self._SPOT_SOURCE
+        requested_margin_mode = str(margin_mode or "cross").strip().lower()
+        self.margin_mode = "isolated" if requested_margin_mode in ("isolated", "iso") else "cross"
+        self.allow_auto_asset_mode_switch = str(
+            os.getenv("QD_HTX_ALLOW_AUTO_ASSET_MODE_SWITCH", "false")
+        ).strip().lower() in ("1", "true", "yes")
         if self.market_type not in ("spot", "swap"):
             self.market_type = "swap"
         if not self.api_key or not self.secret_key:
@@ -203,6 +215,9 @@ class HtxClient(BaseRestClient):
 
     def _try_upgrade_to_multi_asset_mode(self) -> bool:
         """Switch account to multi-asset collateral (asset_mode=1) for V5 private APIs."""
+        if not self.allow_auto_asset_mode_switch:
+            logger.warning("HTX automatic asset-mode switching is disabled")
+            return False
         if self._v5_multi_asset_switch_tried:
             return self._v5_asset_mode == 1
         self._v5_multi_asset_switch_tried = True
@@ -293,7 +308,7 @@ class HtxClient(BaseRestClient):
         return False
 
     def _default_margin_mode(self) -> str:
-        return "cross"
+        return self.margin_mode
 
     def get_swap_hedge_mode(self, *, symbol: str) -> bool:
         """
@@ -490,7 +505,7 @@ class HtxClient(BaseRestClient):
         val = self._floor_to_int(contracts)
         return val if val > 0 else 1
 
-    def set_leverage(self, *, symbol: str, leverage: float) -> bool:
+    def set_leverage(self, *, symbol: str, leverage: float, margin_mode: str = "") -> bool:
         if self.market_type == "spot":
             return False
         contract_code = to_htx_contract_code(symbol)
@@ -500,19 +515,26 @@ class HtxClient(BaseRestClient):
             lv = 1
         if lv < 1:
             lv = 1
+        mode = str(margin_mode or self._default_margin_mode()).strip().lower()
+        if mode not in ("cross", "isolated"):
+            return False
+        self.margin_mode = mode
         body = htx_v5.build_lever_body(
             contract_code=contract_code,
             lever_rate=lv,
-            margin_mode=self._default_margin_mode(),
+            margin_mode=mode,
         )
         self._swap_v5_request("POST", "/v5/position/lever", json_body=body)
         self._lever_cache[contract_code] = lv
         return True
 
     def _place_swap_order_v1(self, body: Dict[str, Any]) -> LiveOrderResult:
-        raw = self._swap_private_request_raw(
-            "POST", "/linear-swap-api/v1/swap_cross_order", json_body=body
+        endpoint = (
+            "/linear-swap-api/v1/swap_order"
+            if self._default_margin_mode() == "isolated"
+            else "/linear-swap-api/v1/swap_cross_order"
         )
+        raw = self._swap_private_request_raw("POST", endpoint, json_body=body)
         if str(raw.get("status") or "").lower() != "ok":
             err = raw.get("err_msg") or raw.get("err_code") or raw
             raise LiveTradingError(f"HTX swap_cross_order: {err}")
@@ -560,7 +582,7 @@ class HtxClient(BaseRestClient):
         order_price_type = "limit" if has_price else "opponent"
         price = float(body["price"]) if has_price else None
         client_order_id = body.get("client_order_id")
-        channel_code = str(body.get("channel_code") or self.broker_id or "")
+        channel_code = self.broker_id
         volume = int(body.get("volume") or 0)
         preferred = self.get_swap_hedge_mode(symbol=symbol)
 
@@ -716,7 +738,7 @@ class HtxClient(BaseRestClient):
                 "symbol": to_htx_spot_symbol(symbol),
                 "type": order_type,
                 "amount": f"{amount:.12f}".rstrip("0").rstrip("."),
-                "source": "spot-api",
+                "source": self.spot_source,
             }
             formatted_client_order_id = self._format_spot_client_order_id(client_order_id)
             if formatted_client_order_id:
@@ -781,7 +803,7 @@ class HtxClient(BaseRestClient):
                 "type": f"{sd}-limit",
                 "amount": f"{qty:.12f}".rstrip("0").rstrip("."),
                 "price": f"{px:.12f}".rstrip("0").rstrip("."),
-                "source": "spot-api",
+                "source": self.spot_source,
             }
             formatted_client_order_id = self._format_spot_client_order_id(client_order_id)
             if formatted_client_order_id:

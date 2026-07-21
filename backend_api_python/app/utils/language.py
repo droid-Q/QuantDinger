@@ -21,6 +21,7 @@ SUPPORTED_LANGS = {
     "ar-SA",
     "fr-FR",
     "de-DE",
+    "ru-RU",
 }
 
 

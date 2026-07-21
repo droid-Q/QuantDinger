@@ -81,6 +81,7 @@ def test_parse_positions_okx_net_mode_wrapper():
                 "avgPx": "0.9129",
                 "upl": "0.1526",
                 "markPx": "0.9115",
+                "notionalUsd": "99.75",
             }
         ],
     }
@@ -88,6 +89,7 @@ def test_parse_positions_okx_net_mode_wrapper():
     assert len(out) == 1
     assert out[0]["side"] == "short"
     assert out[0]["size"] == 109.0
+    assert out[0]["notional_usdt"] == 99.75
 
 
 def test_normalize_okx_positions_raw_net_short():

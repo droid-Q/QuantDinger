@@ -1,4 +1,4 @@
-"""Durable state proxy exposed to ScriptStrategy as ``ctx.state``."""
+"""Durable state storage for strategy runtime services."""
 
 from __future__ import annotations
 
@@ -76,7 +76,13 @@ class RuntimeStateStore:
                 db.commit()
                 cur.close()
         except Exception as exc:
-            logger.debug("runtime state save skipped: %s", exc)
+            logger.warning(
+                "Runtime state persistence failed: strategy=%s run=%s key=%s",
+                self.strategy_id,
+                self.strategy_run_id,
+                self.state_key,
+                exc_info=True,
+            )
 
 
 class RuntimeStateProxy:

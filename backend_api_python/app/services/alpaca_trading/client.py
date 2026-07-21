@@ -109,9 +109,10 @@ def _ensure_alpaca():
         try:
             from alpaca.trading.client import TradingClient
             from alpaca.trading.requests import (
-                MarketOrderRequest, LimitOrderRequest, GetOrdersRequest
+                MarketOrderRequest, LimitOrderRequest, GetOrdersRequest,
+                TakeProfitRequest, StopLossRequest,
             )
-            from alpaca.trading.enums import OrderSide, TimeInForce, QueryOrderStatus
+            from alpaca.trading.enums import OrderSide, TimeInForce, QueryOrderStatus, OrderClass
             from alpaca.data.historical import StockHistoricalDataClient, CryptoHistoricalDataClient
             from alpaca.data.requests import StockLatestQuoteRequest, CryptoLatestQuoteRequest
             _alpaca_modules = {
@@ -119,9 +120,12 @@ def _ensure_alpaca():
                 "MarketOrderRequest": MarketOrderRequest,
                 "LimitOrderRequest": LimitOrderRequest,
                 "GetOrdersRequest": GetOrdersRequest,
+                "TakeProfitRequest": TakeProfitRequest,
+                "StopLossRequest": StopLossRequest,
                 "OrderSide": OrderSide,
                 "TimeInForce": TimeInForce,
                 "QueryOrderStatus": QueryOrderStatus,
+                "OrderClass": OrderClass,
                 "StockHistoricalDataClient": StockHistoricalDataClient,
                 "CryptoHistoricalDataClient": CryptoHistoricalDataClient,
                 "StockLatestQuoteRequest": StockLatestQuoteRequest,
@@ -197,8 +201,10 @@ class AlpacaClient:
                 paper=self.config.paper,
                 url_override=self.config.base_url,
             )
-            # Align market-data REST with paper sandbox when using PK* keys.
-            data_sandbox = bool(self.config.paper)
+            # Paper trading keys use the standard Alpaca market-data endpoint.
+            # The SDK sandbox flag targets a separate data sandbox and rejects
+            # normal PK-prefixed paper credentials.
+            data_sandbox = False
             self._stock_data_client = modules["StockHistoricalDataClient"](
                 api_key=api_key,
                 secret_key=secret_key,
@@ -239,24 +245,67 @@ class AlpacaClient:
 
     # ==================== Order Methods ====================
 
+    @staticmethod
+    def _order_commission_snapshot(order: Any) -> Dict[str, Any]:
+        commission = _num(getattr(order, "commission", 0))
+        if commission <= 0:
+            return {"commission": 0.0, "commission_ccy": ""}
+        return {
+            "commission": abs(commission),
+            "commission_ccy": str(getattr(order, "commission_currency", "") or "USD").upper(),
+            "commission_type": _enum_value(getattr(order, "commission_type", "")),
+        }
+
     def place_market_order(
         self,
         symbol: str,
         side: str,
         quantity: float,
         market_type: str = "USStock",
+        take_profit_price: float = 0.0,
+        stop_loss_price: float = 0.0,
     ) -> OrderResult:
         """Place a market order. market_type: 'USStock' or 'crypto'."""
         try:
             self._ensure_connected()
             modules = _ensure_alpaca()
             sym, asset_class = parse_symbol(symbol, market_hint=_market_hint_from_type(market_type))
+            requested_quantity = float(quantity)
+            if side.lower() == "sell":
+                positions = self._trading_client.get_all_positions()
+                matching = next(
+                    (
+                        position
+                        for position in positions
+                        if str(getattr(position, "symbol", "") or "").replace("/", "").upper()
+                        == sym.replace("/", "").upper()
+                    ),
+                    None,
+                )
+                available_quantity = _num(getattr(matching, "qty", 0)) if matching else 0.0
+                if 0 < available_quantity < requested_quantity:
+                    quantity = available_quantity
 
+            request_kwargs = {
+                "symbol": sym,
+                "qty": quantity,
+                "side": modules["OrderSide"].BUY if side.lower() == "buy" else modules["OrderSide"].SELL,
+                "time_in_force": modules["TimeInForce"].GTC if asset_class == "crypto" else modules["TimeInForce"].DAY,
+            }
+            take_profit_price = float(take_profit_price or 0.0)
+            stop_loss_price = float(stop_loss_price or 0.0)
+            if asset_class == "us_equity" and (take_profit_price > 0 or stop_loss_price > 0):
+                request_kwargs["order_class"] = (
+                    modules["OrderClass"].BRACKET
+                    if take_profit_price > 0 and stop_loss_price > 0
+                    else modules["OrderClass"].OTO
+                )
+                if take_profit_price > 0:
+                    request_kwargs["take_profit"] = modules["TakeProfitRequest"](limit_price=take_profit_price)
+                if stop_loss_price > 0:
+                    request_kwargs["stop_loss"] = modules["StopLossRequest"](stop_price=stop_loss_price)
             req = modules["MarketOrderRequest"](
-                symbol=sym,
-                qty=quantity,
-                side=modules["OrderSide"].BUY if side.lower() == "buy" else modules["OrderSide"].SELL,
-                time_in_force=modules["TimeInForce"].GTC if asset_class == "crypto" else modules["TimeInForce"].DAY,
+                **request_kwargs,
             )
             order = self._trading_client.submit_order(order_data=req)
 
@@ -280,7 +329,10 @@ class AlpacaClient:
                     "id": str(order.id),
                     "status": status,
                     "filled_qty": filled_qty,
+                    "requested_qty": requested_quantity,
+                    "submitted_qty": float(quantity),
                     "submitted_at": str(order.submitted_at),
+                    **self._order_commission_snapshot(order),
                 },
             )
         except Exception as e:
@@ -295,21 +347,50 @@ class AlpacaClient:
         price: float,
         market_type: str = "USStock",
         extended_hours: bool = False,
+        take_profit_price: float = 0.0,
+        stop_loss_price: float = 0.0,
     ) -> OrderResult:
         """Place a limit order. extended_hours=True for pre/post-market."""
         try:
             self._ensure_connected()
             modules = _ensure_alpaca()
             sym, asset_class = parse_symbol(symbol, market_hint=_market_hint_from_type(market_type))
+            if side.lower() == "sell":
+                positions = self._trading_client.get_all_positions()
+                matching = next(
+                    (
+                        position
+                        for position in positions
+                        if str(getattr(position, "symbol", "") or "").replace("/", "").upper()
+                        == sym.replace("/", "").upper()
+                    ),
+                    None,
+                )
+                available_quantity = _num(getattr(matching, "qty", 0)) if matching else 0.0
+                if 0 < available_quantity < float(quantity):
+                    quantity = available_quantity
 
-            req = modules["LimitOrderRequest"](
-                symbol=sym,
-                qty=quantity,
-                side=modules["OrderSide"].BUY if side.lower() == "buy" else modules["OrderSide"].SELL,
-                time_in_force=modules["TimeInForce"].GTC if asset_class == "crypto" else modules["TimeInForce"].DAY,
-                limit_price=price,
-                extended_hours=extended_hours if asset_class == "us_equity" else False,
-            )
+            request_kwargs = {
+                "symbol": sym,
+                "qty": quantity,
+                "side": modules["OrderSide"].BUY if side.lower() == "buy" else modules["OrderSide"].SELL,
+                "time_in_force": modules["TimeInForce"].GTC if asset_class == "crypto" else modules["TimeInForce"].DAY,
+                "limit_price": price,
+                "extended_hours": extended_hours if asset_class == "us_equity" else False,
+            }
+            take_profit_price = float(take_profit_price or 0.0)
+            stop_loss_price = float(stop_loss_price or 0.0)
+            if asset_class == "us_equity" and (take_profit_price > 0 or stop_loss_price > 0):
+                request_kwargs["order_class"] = (
+                    modules["OrderClass"].BRACKET
+                    if take_profit_price > 0 and stop_loss_price > 0
+                    else modules["OrderClass"].OTO
+                )
+                if take_profit_price > 0:
+                    request_kwargs["take_profit"] = modules["TakeProfitRequest"](limit_price=take_profit_price)
+                if stop_loss_price > 0:
+                    request_kwargs["stop_loss"] = modules["StopLossRequest"](stop_price=stop_loss_price)
+            req = modules["LimitOrderRequest"](**request_kwargs)
             order = self._trading_client.submit_order(order_data=req)
             time.sleep(1)
             order = self._trading_client.get_order_by_id(order.id)
@@ -331,6 +412,7 @@ class AlpacaClient:
                     "status": status,
                     "limit_price": price,
                     "extended_hours": extended_hours,
+                    **self._order_commission_snapshot(order),
                 },
             )
         except Exception as e:
@@ -369,6 +451,7 @@ class AlpacaClient:
                 "submitted_at": str(getattr(order, "submitted_at", "") or ""),
                 "filled_at": str(getattr(order, "filled_at", "") or ""),
                 "canceled_at": str(getattr(order, "canceled_at", "") or ""),
+                **self._order_commission_snapshot(order),
             }
             failed = status.lower() in ("rejected", "expired")
             return OrderResult(
@@ -468,12 +551,20 @@ class AlpacaClient:
             logger.error(f"Alpaca get_positions failed: {e}")
             return []
 
-    def get_open_orders(self) -> List[Dict[str, Any]]:
-        """Get all open orders."""
+    def get_orders(self, status: str = "all", limit: int = 100) -> List[Dict[str, Any]]:
+        """Get recent orders, including filled orders by default."""
         try:
             self._ensure_connected()
             modules = _ensure_alpaca()
-            req = modules["GetOrdersRequest"](status=modules["QueryOrderStatus"].OPEN, limit=500)
+            query_status = (
+                modules["QueryOrderStatus"].OPEN
+                if str(status or "").strip().lower() == "open"
+                else modules["QueryOrderStatus"].ALL
+            )
+            req = modules["GetOrdersRequest"](
+                status=query_status,
+                limit=max(1, min(int(limit), 500)),
+            )
             orders = self._trading_client.get_orders(filter=req)
             return [
                 {
@@ -503,8 +594,12 @@ class AlpacaClient:
                 for o in orders
             ]
         except Exception as e:
-            logger.error(f"Alpaca get_open_orders failed: {e}")
+            logger.error(f"Alpaca get_orders failed: {e}")
             return []
+
+    def get_open_orders(self) -> List[Dict[str, Any]]:
+        """Backward-compatible open-order query."""
+        return self.get_orders(status="open", limit=500)
 
     def get_quote(self, symbol: str, market_type: str = "USStock") -> Dict[str, Any]:
         """Get latest quote (bid/ask). Routes to stock or crypto data client per asset class."""

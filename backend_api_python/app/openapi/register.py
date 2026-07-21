@@ -18,10 +18,14 @@ _PREFIX_TAGS: list[tuple[str, str]] = [
     ("/api/auth", "Auth"),
     ("/api/users", "Users"),
     ("/api/indicator", "Indicator"),
+    ("/api/backtest", "Strategy"),
     ("/api/market", "Market"),
+    ("/api/universes", "Universe"),
+    ("/api/factors", "Factor"),
     ("/api/market-modules", "Market"),
     ("/api/ai", "AIChat"),
     ("/api/account", "Account"),
+    ("/api/strategy-assets", "Strategy"),
     ("/api/strategies", "Strategy"),
     ("/api/bots", "Strategy"),
     ("/api/credentials", "Credentials"),
@@ -36,7 +40,6 @@ _PREFIX_TAGS: list[tuple[str, str]] = [
     ("/api/fast-analysis", "FastAnalysis"),
     ("/api/billing", "Billing"),
     ("/api/quick-trade", "QuickTrade"),
-    ("/api/experiment", "Experiment"),
 ]
 
 
@@ -58,11 +61,14 @@ def register_human_blueprints(api: Api) -> None:
     from app.routes.auth import auth_blp
     from app.routes.user import user_blp
     from app.routes.kline import kline_blp
-    from app.routes.backtest import backtest_blp
+    from app.routes.backtest_center import backtest_center_blp
     from app.routes.market import market_blp
+    from app.routes.universe import universe_blp
+    from app.routes.factors import factors_blp
     from app.routes.market_modules import market_modules_blp
     from app.routes.ai_chat import ai_chat_blp
     from app.routes.indicator import indicator_blp
+    from app.routes.indicator_signal_alerts import indicator_signal_alerts_blp
     from app.routes.strategy import strategy_blp
     from app.routes.credentials import credentials_blp
     from app.routes.dashboard import dashboard_blp
@@ -76,7 +82,6 @@ def register_human_blueprints(api: Api) -> None:
     from app.routes.fast_analysis import fast_analysis_blp
     from app.routes.billing import billing_blp
     from app.routes.quick_trade import quick_trade_blp
-    from app.routes.experiment import experiment_blp
 
     registrations: list[tuple] = [
         (health_blp, ""),
@@ -84,11 +89,14 @@ def register_human_blueprints(api: Api) -> None:
         (auth_blp, "/api/auth"),
         (user_blp, "/api/users"),
         (kline_blp, "/api/indicator"),
-        (backtest_blp, "/api/indicator"),
+        (backtest_center_blp, "/api/backtest"),
         (market_blp, "/api/market"),
+        (universe_blp, "/api/universes"),
+        (factors_blp, "/api/factors"),
         (market_modules_blp, "/api/market-modules"),
         (ai_chat_blp, "/api/ai"),
         (indicator_blp, "/api/indicator"),
+        (indicator_signal_alerts_blp, "/api/indicator"),
         (strategy_blp, "/api"),
         (credentials_blp, "/api/credentials"),
         (dashboard_blp, "/api/dashboard"),
@@ -102,7 +110,6 @@ def register_human_blueprints(api: Api) -> None:
         (fast_analysis_blp, "/api/fast-analysis"),
         (billing_blp, "/api/billing"),
         (quick_trade_blp, "/api/quick-trade"),
-        (experiment_blp, "/api/experiment"),
     ]
 
     for blp, prefix in registrations:
@@ -118,8 +125,6 @@ def register_human_blueprints(api: Api) -> None:
 
 _SSE_PATHS = frozenset({
     "/api/indicator/aiGenerate",
-    "/api/strategies/ai-generate",
-    "/api/experiment/ai-optimize",
 })
 
 
@@ -192,15 +197,13 @@ def enrich_spec(spec_dict: dict) -> dict:
 
     for path, item in paths.items():
         tag = None
+        path_parameter_names = re.findall(r"\{([^{}]+)\}", path)
         for prefix, t in _PREFIX_TAGS:
             if path.startswith(prefix):
                 tag = t
                 break
         if path in ("/", "/health", "/api/health"):
             tag = "Health"
-        if path.startswith("/api/indicator") and "/backtest" in path:
-            tag = "Backtest"
-
         for method, op in item.items():
             if method.startswith("x-") or not isinstance(op, dict):
                 continue
@@ -213,6 +216,24 @@ def enrich_spec(spec_dict: dict) -> dict:
             _normalize_operation_docs(op)
             if tag:
                 op["tags"] = [tag]
+            if path_parameter_names:
+                parameters = op.setdefault("parameters", [])
+                documented = {
+                    str(parameter.get("name"))
+                    for parameter in parameters
+                    if isinstance(parameter, dict) and parameter.get("in") == "path"
+                }
+                for name in path_parameter_names:
+                    if name in documented:
+                        continue
+                    parameters.append(
+                        {
+                            "name": name,
+                            "in": "path",
+                            "required": True,
+                            "schema": {"type": "integer" if name == "id" or name.endswith("_id") else "string"},
+                        }
+                    )
             responses = op.setdefault("responses", {})
             has_success = any(str(code).startswith(("2", "3")) for code in responses)
             if not has_success:
@@ -235,7 +256,9 @@ def enrich_spec(spec_dict: dict) -> dict:
                         },
                     }
             if "x-visibility" not in op:
-                if tag in ("Community", "Market", "Indicator", "Backtest", "Policy", "Auth", "GlobalMarket", "FastAnalysis", "Health"):
+                if path == "/metrics":
+                    op["x-visibility"] = "internal"
+                elif tag in ("Community", "Market", "Indicator", "Backtest", "Policy", "Auth", "GlobalMarket", "FastAnalysis", "Health"):
                     op["x-visibility"] = "public"
                 elif tag in ("Credentials", "QuickTrade", "Billing"):
                     op["x-visibility"] = "private"

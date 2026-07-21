@@ -47,6 +47,18 @@ def _sort_key(row: Dict[str, Any]) -> Tuple[int, int]:
     return ts_i, tid
 
 
+def _quote_commission(row: Dict[str, Any], fallback_key: str = "commission") -> float:
+    if "commission_quote" in row:
+        try:
+            return float(row.get("commission_quote") or 0.0)
+        except Exception:
+            return 0.0
+    try:
+        return float(row.get(fallback_key) or 0.0)
+    except Exception:
+        return 0.0
+
+
 def allocate_open_commissions_fifo(trades: List[Dict[str, Any]]) -> Dict[int, float]:
     """
     Walk trades chronologically and return {trade_id: allocated_open_commission}
@@ -69,10 +81,7 @@ def allocate_open_commissions_fifo(trades: List[Dict[str, Any]]) -> Dict[int, fl
             amount = float(row.get("amount") or 0.0)
         except Exception:
             amount = 0.0
-        try:
-            commission = float(row.get("commission") or 0.0)
-        except Exception:
-            commission = 0.0
+        commission = _quote_commission(row)
 
         if not is_exit_trade_type(ttype):
             if amount > 1e-12:
@@ -121,10 +130,13 @@ def net_realized_pnl(
         gross = float(trade.get("profit_gross") if trade.get("profit_gross") is not None else trade.get("profit") or 0.0)
     except Exception:
         gross = 0.0
-    try:
-        close_comm = float(trade.get("close_commission") if trade.get("close_commission") is not None else trade.get("commission") or 0.0)
-    except Exception:
-        close_comm = 0.0
+    if trade.get("close_commission") is not None:
+        try:
+            close_comm = float(trade.get("close_commission") or 0.0)
+        except Exception:
+            close_comm = 0.0
+    else:
+        close_comm = _quote_commission(trade)
     return float(gross) - close_comm - float(open_commission or 0.0)
 
 
@@ -151,10 +163,7 @@ def enrich_trades_net_pnl(trades: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
             gross = float(row.get("profit") or 0.0)
         except Exception:
             gross = 0.0
-        try:
-            close_comm = float(row.get("commission") or 0.0)
-        except Exception:
-            close_comm = 0.0
+        close_comm = _quote_commission(row)
         net = gross - close_comm - open_comm
         row["profit_gross"] = gross
         row["open_commission_allocated"] = round(open_comm, 8)
@@ -187,6 +196,6 @@ def net_pnl_for_equity_step(trade: Dict[str, Any]) -> float:
         val = net_realized_pnl(trade, open_commission=open_comm)
         return float(val or 0.0)
     try:
-        return -float(trade.get("commission") or 0.0)
+        return -_quote_commission(trade)
     except Exception:
         return 0.0

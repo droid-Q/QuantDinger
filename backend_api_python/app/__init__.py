@@ -5,20 +5,25 @@ import json
 import math
 import os
 from datetime import date, datetime
+from pathlib import Path
+
+try:
+    from dotenv import load_dotenv
+
+    _backend_dir = Path(__file__).resolve().parents[1]
+    load_dotenv(_backend_dir / ".env", override=False)
+    load_dotenv(_backend_dir.parent / ".env", override=False)
+except Exception:
+    pass
 
 from flask import Flask
 from flask.json.provider import DefaultJSONProvider
 from flask_cors import CORS
 
 from app.startup import (
-    get_pending_order_worker,
-    get_trading_executor,
-    restore_running_strategies,
+    get_pending_order_worker as get_pending_order_worker,
+    get_trading_executor as get_trading_executor,
     run_startup_hooks,
-    start_grid_fill_poller,
-    start_pending_order_worker,
-    start_portfolio_monitor,
-    start_usdt_order_worker,
 )
 from app.utils.logger import get_logger, setup_logger
 from app.utils.timeutil import to_utc_iso
@@ -102,27 +107,38 @@ def _bootstrap_database() -> None:
         logger.info(f"Database type: {get_db_type()}")
         init_database()
 
-        from app.services.user_service import get_user_service
-        get_user_service().ensure_admin_exists()
+        from app.runtime.roles import ProcessRole, current_process_role
 
-        try:
-            from app.services.builtin_indicators import upgrade_builtin_indicator_samples
-            upgrade_builtin_indicator_samples()
-        except Exception as sample_exc:
-            logger.warning(f"Builtin indicator sample upgrade skipped: {sample_exc}")
+        if current_process_role() in {ProcessRole.API, ProcessRole.LEGACY}:
+            from app.services.user_service import get_user_service
+
+            get_user_service().ensure_admin_exists()
+
+            try:
+                from app.services.builtin_indicators import upgrade_builtin_indicator_samples
+
+                upgrade_builtin_indicator_samples()
+            except Exception as sample_exc:
+                logger.warning(f"Builtin indicator sample upgrade skipped: {sample_exc}")
     except Exception as e:
         logger.warning(f"Database initialization note: {e}")
 
 
-def create_app(config_name='default'):
+def create_app(config_name='default', *, register_http_routes: bool = True):
     """Create and configure the Flask application."""
     app = Flask(__name__)
     app.json_provider_class = SafeJSONProvider
     app.json = SafeJSONProvider(app)
     app.config['JSON_AS_ASCII'] = False
 
-    _configure_cors(app)
+    if register_http_routes:
+        _configure_cors(app)
     setup_logger()
+
+    if register_http_routes:
+        from app.observability import init_http_observability
+
+        init_http_observability(app)
 
     from app.utils.auth import _configure_jwt_secret_warnings
     _configure_jwt_secret_warnings()
@@ -130,8 +146,10 @@ def create_app(config_name='default'):
     _configure_ibkr_asyncio()
     _bootstrap_database()
 
-    from app.routes import register_routes
-    register_routes(app)
+    if register_http_routes:
+        from app.routes import register_routes
+
+        register_routes(app)
     run_startup_hooks(app)
 
     return app

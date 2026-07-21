@@ -870,6 +870,101 @@ def _safe_json_loads(s, default=None):
         return default
 
 
+def _strategy_v2_admin_metadata(
+    *,
+    strategy_type: str,
+    trading_config: dict,
+    source_id: int = 0,
+    source_name: str = "",
+    source_asset_type: str = "",
+    source_template_key: str = "",
+    source_metadata: dict | None = None,
+    fallback_symbol: str = "",
+    fallback_market: str = "",
+    fallback_market_type: str = "",
+    fallback_frequency: str = "",
+) -> dict:
+    """Build the admin-facing Strategy API V2 contract summary."""
+    config = _safe_json_loads(trading_config, {}) or {}
+    source_meta = _safe_json_loads(source_metadata, {}) or {}
+    manifest = config.get("strategy_manifest") or source_meta.get("strategy_manifest") or {}
+    api_version = int(config.get("api_version") or manifest.get("apiVersion") or 0)
+    is_v2 = str(strategy_type or "").strip().lower() == "strategyv2" or api_version == 2
+
+    template_key = str(source_template_key or "").strip()
+    source_origin = str(source_meta.get("source") or "").strip().lower()
+    is_robot = template_key.startswith("robot_v2_") or source_origin == "robot_builder"
+    manifest_type = str(manifest.get("strategyType") or "").strip().lower()
+    is_portfolio = (
+        not is_robot
+        and (
+            manifest_type == "portfolio"
+            or str(source_asset_type or "").strip().lower() == "portfolio_strategy"
+        )
+    )
+    strategy_class = "robot" if is_robot else ("portfolio" if is_portfolio else "cta")
+
+    universe = manifest.get("universe") or {}
+    instruments = [item for item in (universe.get("instruments") or []) if isinstance(item, dict)]
+    symbols = [str(item.get("symbol") or "").strip() for item in instruments]
+    symbols = [value for value in symbols if value]
+    if not symbols and fallback_symbol and not str(fallback_symbol).startswith(("basket:", "universe:")):
+        symbols = [str(fallback_symbol)]
+    universe_reference = str(universe.get("reference") or "").strip()
+    if not universe_reference and str(fallback_symbol or "").startswith("universe:"):
+        universe_reference = str(fallback_symbol).split(":", 1)[1]
+    instrument_count = len(instruments)
+    if not instrument_count and str(fallback_symbol or "").startswith("basket:"):
+        try:
+            instrument_count = int(str(fallback_symbol).split(":", 1)[1])
+        except (TypeError, ValueError):
+            instrument_count = 0
+    if not instrument_count and symbols:
+        instrument_count = len(symbols)
+
+    markets = [str(value) for value in (manifest.get("markets") or []) if value]
+    if not markets and fallback_market:
+        markets = [str(fallback_market)]
+    market_types = sorted({
+        str(item.get("market_type") or "").strip().lower()
+        for item in instruments
+        if str(item.get("market_type") or "").strip()
+    })
+    if not market_types and fallback_market_type:
+        market_types = [str(fallback_market_type).strip().lower()]
+
+    primary_frequency = str(manifest.get("primaryFrequency") or fallback_frequency or "").strip()
+    schedules = [item for item in (manifest.get("schedules") or []) if isinstance(item, dict)]
+    normalized_source_id = int(source_id or config.get("script_source_id") or 0)
+    contract_ready = bool(
+        is_v2
+        and api_version == 2
+        and normalized_source_id > 0
+        and int(manifest.get("apiVersion") or 0) == 2
+    )
+    return {
+        "api_version": api_version,
+        "is_strategy_v2": is_v2,
+        "contract_ready": contract_ready,
+        "source_id": normalized_source_id,
+        "source_name": str(source_name or "").strip(),
+        "source_asset_type": str(source_asset_type or "").strip(),
+        "template_key": template_key,
+        "strategy_class": strategy_class,
+        "universe_kind": str(universe.get("kind") or ("reference" if universe_reference else "static")),
+        "universe_reference": universe_reference,
+        "instrument_count": instrument_count,
+        "universe_symbols": symbols,
+        "markets": markets,
+        "market_types": market_types,
+        "primary_frequency": primary_frequency,
+        "schedule_count": len(schedules),
+        "warmup_bars": int(manifest.get("warmupBars") or 0),
+        "leverage_allowed": bool(manifest.get("leverageAllowed")),
+        "max_leverage": float(manifest.get("maxLeverage") or 1),
+    }
+
+
 def _strategy_exchange_display_name(
     exchange_config: dict,
     *,
@@ -958,6 +1053,7 @@ def get_system_strategies():
         page_size: int (default 20, max 100)
         status: str (optional, filter by status: running/stopped/all)
         execution_mode: str (optional, live/signal; omit or all for any)
+        strategy_class: str (optional, cta/portfolio/robot; omit or all for any)
         search: str (optional, search by strategy name/symbol/username/id)
         strategy_id: int (optional, exact strategy id)
         user_id: int (optional, exact owner user id)
@@ -969,6 +1065,7 @@ def get_system_strategies():
         page_size = request.args.get('page_size', 20, type=int)
         status_filter = request.args.get('status', '', type=str).strip().lower()
         execution_filter = request.args.get('execution_mode', '', type=str).strip().lower()
+        strategy_class_filter = request.args.get('strategy_class', '', type=str).strip().lower()
         search = request.args.get('search', '', type=str).strip()
         strategy_id_filter = _parse_positive_int(request.args.get('strategy_id'))
         user_id_filter = _parse_positive_int(request.args.get('user_id'))
@@ -993,7 +1090,7 @@ def get_system_strategies():
         sort_expr_map = {
             'total_pnl': (
                 "(COALESCE((SELECT SUM(unrealized_pnl) FROM qd_strategy_positions p WHERE p.strategy_id = s.id), 0)"
-                " + COALESCE((SELECT SUM(COALESCE(t.profit, 0) - COALESCE(t.commission, 0)) FROM qd_strategy_trades t WHERE t.strategy_id = s.id), 0))"
+                " + COALESCE((SELECT SUM(COALESCE(t.profit, 0) - COALESCE(t.commission_quote, 0)) FROM qd_strategy_trades t WHERE t.strategy_id = s.id), 0))"
             ),
             'trade_count': '(SELECT COUNT(*) FROM qd_strategy_trades t WHERE t.strategy_id = s.id)',
             'position_count': '(SELECT COUNT(*) FROM qd_strategy_positions p WHERE p.strategy_id = s.id)',
@@ -1002,6 +1099,23 @@ def get_system_strategies():
             ),
         }
         direction = 'ASC' if sort_order == 'asc' else 'DESC'
+
+        source_join_sql = """
+            LEFT JOIN qd_script_sources src
+              ON src.id = CASE
+                WHEN COALESCE((s.trading_config::jsonb)->>'script_source_id', '') ~ '^[0-9]+$'
+                THEN ((s.trading_config::jsonb)->>'script_source_id')::INTEGER
+                ELSE NULL
+              END
+        """
+        v2_expr = "(s.strategy_type = 'StrategyV2' OR COALESCE((s.trading_config::jsonb)->>'api_version', '0') = '2')"
+        robot_expr = "(LEFT(COALESCE(src.template_key, ''), 9) = 'robot_v2_' OR COALESCE(src.metadata->>'source', '') = 'robot_builder')"
+        portfolio_expr = "(NOT {robot} AND (COALESCE(src.asset_type, '') = 'portfolio_strategy' OR COALESCE((s.trading_config::jsonb)->'strategy_manifest'->>'strategyType', '') = 'portfolio'))".format(robot=robot_expr)
+        cta_expr = "({v2} AND NOT {robot} AND NOT {portfolio})".format(
+            v2=v2_expr,
+            robot=robot_expr,
+            portfolio=portfolio_expr,
+        )
 
         with get_db_connection() as db:
             cur = db.cursor()
@@ -1018,6 +1132,13 @@ def get_system_strategies():
                 conditions.append("s.execution_mode = ?")
                 params.append(execution_filter)
 
+            if strategy_class_filter == 'robot':
+                conditions.append(robot_expr)
+            elif strategy_class_filter == 'portfolio':
+                conditions.append(portfolio_expr)
+            elif strategy_class_filter == 'cta':
+                conditions.append(cta_expr)
+
             if strategy_id_filter > 0:
                 conditions.append("s.id = ?")
                 params.append(strategy_id_filter)
@@ -1032,15 +1153,15 @@ def get_system_strategies():
                     num = int(search)
                     conditions.append(
                         "(s.id = ? OR s.user_id = ? OR s.strategy_name ILIKE ? OR s.symbol ILIKE ? "
-                        "OR u.username ILIKE ? OR u.nickname ILIKE ?)"
+                        "OR u.username ILIKE ? OR u.nickname ILIKE ? OR src.name ILIKE ?)"
                     )
-                    params.extend([num, num, like_val, like_val, like_val, like_val])
+                    params.extend([num, num, like_val, like_val, like_val, like_val, like_val])
                 else:
                     conditions.append(
                         "(s.strategy_name ILIKE ? OR s.symbol ILIKE ? OR u.username ILIKE ? OR u.nickname ILIKE ?"
-                        " OR CAST(s.id AS TEXT) ILIKE ? OR CAST(s.user_id AS TEXT) ILIKE ?)"
+                        " OR src.name ILIKE ? OR CAST(s.id AS TEXT) ILIKE ? OR CAST(s.user_id AS TEXT) ILIKE ?)"
                     )
-                    params.extend([like_val, like_val, like_val, like_val, like_val, like_val])
+                    params.extend([like_val, like_val, like_val, like_val, like_val, like_val, like_val])
 
             where_clause = ""
             if conditions:
@@ -1058,6 +1179,7 @@ def get_system_strategies():
                 SELECT COUNT(*) as cnt
                 FROM qd_strategies_trading s
                 LEFT JOIN qd_users u ON u.id = s.user_id
+                {source_join_sql}
                 {where_clause}
             """
             cur.execute(count_sql, tuple(params))
@@ -1070,7 +1192,6 @@ def get_system_strategies():
                     s.user_id,
                     s.strategy_name,
                     s.strategy_type,
-                    s.strategy_mode,
                     s.market_category,
                     s.execution_mode,
                     s.status,
@@ -1079,16 +1200,20 @@ def get_system_strategies():
                     s.initial_capital,
                     s.leverage,
                     s.market_type,
-                    s.indicator_config,
                     s.trading_config,
                     s.exchange_config,
-                    s.decide_interval,
                     s.created_at,
                     s.updated_at,
+                    src.id AS source_id,
+                    src.name AS source_name,
+                    src.asset_type AS source_asset_type,
+                    src.template_key AS source_template_key,
+                    src.metadata AS source_metadata,
                     u.username,
                     u.nickname
                 FROM qd_strategies_trading s
                 LEFT JOIN qd_users u ON u.id = s.user_id
+                {source_join_sql}
                 {where_clause}
                 {order_clause}
                 LIMIT ? OFFSET ?
@@ -1127,7 +1252,7 @@ def get_system_strategies():
                     f"""
                     SELECT strategy_id, 
                            COUNT(*) as trade_count, 
-                           COALESCE(SUM(COALESCE(profit, 0) - COALESCE(commission, 0)), 0) as total_realized_pnl
+                           COALESCE(SUM(COALESCE(profit, 0) - COALESCE(commission_quote, 0)), 0) as total_realized_pnl
                     FROM qd_strategy_trades
                     WHERE strategy_id IN ({placeholders})
                     GROUP BY strategy_id
@@ -1157,24 +1282,25 @@ def get_system_strategies():
         items = []
         for s in strategies:
             sid = s['id']
-            indicator_config = _safe_json_loads(s.get('indicator_config'), {})
             trading_config = _safe_json_loads(s.get('trading_config'), {})
             exchange_config = _safe_json_loads(s.get('exchange_config'), {})
+            source_metadata = _safe_json_loads(s.get('source_metadata'), {})
 
-            # Extract indicator name
-            indicator_name = ''
-            if isinstance(indicator_config, dict):
-                indicator_name = indicator_config.get('indicator_name') or indicator_config.get('name') or ''
-            if not indicator_name and str(s.get('strategy_mode') or '').strip().lower() == 'bot':
-                if isinstance(trading_config, dict):
-                    indicator_name = (
-                        trading_config.get('bot_name')
-                        or s.get('strategy_name')
-                        or trading_config.get('bot_type')
-                        or ''
-                    )
-                else:
-                    indicator_name = s.get('strategy_name') or ''
+            admin_metadata = _strategy_v2_admin_metadata(
+                strategy_type=s.get('strategy_type') or '',
+                trading_config=trading_config,
+                source_id=int(s.get('source_id') or 0),
+                source_name=s.get('source_name') or '',
+                source_asset_type=s.get('source_asset_type') or '',
+                source_template_key=s.get('source_template_key') or '',
+                source_metadata=source_metadata,
+                fallback_symbol=s.get('symbol') or '',
+                fallback_market=s.get('market_category') or '',
+                fallback_market_type=s.get('market_type') or '',
+                fallback_frequency=s.get('timeframe') or '',
+            )
+
+            indicator_name = str(trading_config.get('display_name') or '')
 
             # Extract exchange name (inline config or saved credential reference).
             exchange_name = _strategy_exchange_display_name(
@@ -1199,13 +1325,6 @@ def get_system_strategies():
             total_pnl = total_unrealized_pnl + total_realized_pnl
             roi = (total_pnl / initial_capital * 100) if initial_capital > 0 else 0
 
-            # Cross-sectional info
-            cs_type = ''
-            symbol_list = []
-            if isinstance(trading_config, dict):
-                cs_type = trading_config.get('cs_strategy_type') or 'single'
-                symbol_list = trading_config.get('symbol_list') or []
-
             # Timestamps are emitted as UTC ISO by SafeJSONProvider; pass
             # datetime objects straight through.
             created_at = s.get('created_at')
@@ -1218,19 +1337,17 @@ def get_system_strategies():
                 'nickname': s.get('nickname') or '',
                 'strategy_name': s.get('strategy_name') or '',
                 'strategy_type': s.get('strategy_type') or '',
-                'cs_strategy_type': cs_type,
                 'market_category': s.get('market_category') or '',
                 'execution_mode': s.get('execution_mode') or '',
                 'status': s.get('status') or 'stopped',
                 'symbol': s.get('symbol') or '',
-                'symbol_list': symbol_list,
                 'timeframe': s.get('timeframe') or '',
                 'initial_capital': initial_capital,
                 'leverage': int(s.get('leverage') or 1),
                 'market_type': s.get('market_type') or '',
                 'indicator_name': indicator_name,
                 'exchange_name': exchange_name,
-                'decide_interval': s.get('decide_interval') or 300,
+                'data_poll_seconds': trading_config.get('data_poll_seconds') or 5,
                 'position_count': position_count,
                 'total_unrealized_pnl': round(total_unrealized_pnl, 4),
                 'total_realized_pnl': round(total_realized_pnl, 4),
@@ -1240,7 +1357,8 @@ def get_system_strategies():
                 'trade_count': trade_count,
                 'positions': positions,
                 'created_at': created_at,
-                'updated_at': updated_at
+                'updated_at': updated_at,
+                **admin_metadata,
             })
 
         # Compute summary stats from all matched strategies (not just current page items).
@@ -1255,12 +1373,22 @@ def get_system_strategies():
                     COALESCE(SUM(CASE WHEN s.status = 'running' THEN 1 ELSE 0 END), 0) AS running_strategies,
                     COALESCE(SUM(CASE WHEN s.execution_mode = 'live' THEN 1 ELSE 0 END), 0) AS live_strategies,
                     COALESCE(SUM(CASE WHEN s.execution_mode = 'signal' THEN 1 ELSE 0 END), 0) AS signal_strategies,
+                    COALESCE(SUM(CASE WHEN {v2_expr} THEN 1 ELSE 0 END), 0) AS v2_strategies,
+                    COALESCE(SUM(CASE WHEN NOT {v2_expr} THEN 1 ELSE 0 END), 0) AS legacy_strategies,
+                    COALESCE(SUM(CASE WHEN {cta_expr} THEN 1 ELSE 0 END), 0) AS cta_strategies,
+                    COALESCE(SUM(CASE WHEN {portfolio_expr} THEN 1 ELSE 0 END), 0) AS portfolio_strategies,
+                    COALESCE(SUM(CASE WHEN {robot_expr} THEN 1 ELSE 0 END), 0) AS robot_strategies,
+                    COALESCE(SUM(CASE WHEN {v2_expr}
+                        AND COALESCE((s.trading_config::jsonb)->>'api_version', '0') = '2'
+                        AND COALESCE((s.trading_config::jsonb)->'strategy_manifest'->>'apiVersion', '0') = '2'
+                        AND src.id IS NOT NULL THEN 1 ELSE 0 END), 0) AS contract_ready_strategies,
                     COALESCE(SUM(CASE WHEN s.status = 'running' AND s.execution_mode = 'live' THEN 1 ELSE 0 END), 0) AS running_live_strategies,
                     COALESCE(SUM(CASE WHEN s.status = 'running' AND s.execution_mode = 'signal' THEN 1 ELSE 0 END), 0) AS running_signal_strategies,
                     COALESCE(SUM(CASE WHEN s.execution_mode = 'live' THEN s.initial_capital ELSE 0 END), 0) AS live_capital,
                     COALESCE(SUM(CASE WHEN s.execution_mode = 'signal' THEN s.initial_capital ELSE 0 END), 0) AS signal_capital
                 FROM qd_strategies_trading s
                 LEFT JOIN qd_users u ON u.id = s.user_id
+                {source_join_sql}
                 {where_clause}
             """
             cur.execute(agg_sql, tuple(params))
@@ -1274,6 +1402,7 @@ def get_system_strategies():
                 FROM qd_strategy_positions p
                 JOIN qd_strategies_trading s ON s.id = p.strategy_id
                 LEFT JOIN qd_users u ON u.id = s.user_id
+                {source_join_sql}
                 {where_clause}
             """
             cur.execute(unreal_sql, tuple(params))
@@ -1281,12 +1410,13 @@ def get_system_strategies():
 
             # Aggregate realized pnl from trade history.
             realized_sql = f"""
-                SELECT COALESCE(SUM(COALESCE(t.profit, 0) - COALESCE(t.commission, 0)), 0) AS total_realized,
-                       COALESCE(SUM(CASE WHEN s.execution_mode = 'live' THEN COALESCE(t.profit, 0) - COALESCE(t.commission, 0) ELSE 0 END), 0) AS live_realized,
-                       COALESCE(SUM(CASE WHEN s.execution_mode = 'signal' THEN COALESCE(t.profit, 0) - COALESCE(t.commission, 0) ELSE 0 END), 0) AS signal_realized
+                SELECT COALESCE(SUM(COALESCE(t.profit, 0) - COALESCE(t.commission_quote, 0)), 0) AS total_realized,
+                       COALESCE(SUM(CASE WHEN s.execution_mode = 'live' THEN COALESCE(t.profit, 0) - COALESCE(t.commission_quote, 0) ELSE 0 END), 0) AS live_realized,
+                       COALESCE(SUM(CASE WHEN s.execution_mode = 'signal' THEN COALESCE(t.profit, 0) - COALESCE(t.commission_quote, 0) ELSE 0 END), 0) AS signal_realized
                 FROM qd_strategy_trades t
                 JOIN qd_strategies_trading s ON s.id = t.strategy_id
                 LEFT JOIN qd_users u ON u.id = s.user_id
+                {source_join_sql}
                 {where_clause}
             """
             cur.execute(realized_sql, tuple(params))
@@ -1298,6 +1428,7 @@ def get_system_strategies():
         total_system_pnl = float(unreal_row.get('total_unrealized') or 0) + float(realized_row.get('total_realized') or 0)
         live_pnl = float(unreal_row.get('live_unrealized') or 0) + float(realized_row.get('live_realized') or 0)
         signal_pnl = float(unreal_row.get('signal_unrealized') or 0) + float(realized_row.get('signal_realized') or 0)
+        live_capital = float(agg_row.get('live_capital') or 0)
 
         return jsonify({
             'code': 1,
@@ -1315,11 +1446,18 @@ def get_system_strategies():
                     'total_roi': round((total_system_pnl / total_capital * 100) if total_capital > 0 else 0, 2),
                     'live_strategies': int(agg_row.get('live_strategies') or 0),
                     'signal_strategies': int(agg_row.get('signal_strategies') or 0),
+                    'v2_strategies': int(agg_row.get('v2_strategies') or 0),
+                    'legacy_strategies': int(agg_row.get('legacy_strategies') or 0),
+                    'contract_ready_strategies': int(agg_row.get('contract_ready_strategies') or 0),
+                    'cta_strategies': int(agg_row.get('cta_strategies') or 0),
+                    'portfolio_strategies': int(agg_row.get('portfolio_strategies') or 0),
+                    'robot_strategies': int(agg_row.get('robot_strategies') or 0),
                     'running_live_strategies': int(agg_row.get('running_live_strategies') or 0),
                     'running_signal_strategies': int(agg_row.get('running_signal_strategies') or 0),
-                    'live_capital': round(float(agg_row.get('live_capital') or 0), 2),
+                    'live_capital': round(live_capital, 2),
                     'signal_capital': round(float(agg_row.get('signal_capital') or 0), 2),
                     'live_pnl': round(live_pnl, 4),
+                    'live_roi': round((live_pnl / live_capital * 100) if live_capital > 0 else 0, 2),
                     'signal_pnl': round(signal_pnl, 4)
                 }
             }

@@ -46,6 +46,7 @@ def query_exchange_position_size(
     pos_side: str,
     market_type: str,
     exchange_config: Optional[Dict[str, Any]] = None,
+    strict: bool = False,
 ) -> float:
     """
     Best-effort base-asset position size on the connected exchange for ``pos_side``.
@@ -69,6 +70,8 @@ def query_exchange_position_size(
 
             return max(0.0, float(get_spot_free_base_balance(client, symbol=sym) or 0.0))
         except Exception as e:
+            if strict:
+                raise
             logger.debug("spot free balance query failed symbol=%s: %s", sym, e)
             return 0.0
 
@@ -81,6 +84,8 @@ def query_exchange_position_size(
         from app.services.live_trading.kraken_futures import KrakenFuturesClient
         from app.services.live_trading.htx import HtxClient
     except Exception:
+        if strict:
+            raise
         return 0.0
 
     if isinstance(client, OkxClient):
@@ -166,6 +171,7 @@ def query_exchange_position_size(
             qty_base = position_base_qty_for_side(p, side, contracts_to_base=qm)
             if qty_base > 0:
                 return float(qty_base)
+        return 0.0
 
     if isinstance(client, KrakenFuturesClient):
         resp = client.get_open_positions() or {}
@@ -213,6 +219,8 @@ def query_exchange_position_size(
     try:
         positions = client.get_positions() if hasattr(client, "get_positions") else []
     except Exception:
+        if strict:
+            raise
         positions = []
     if isinstance(positions, list):
         for p in positions:
@@ -229,6 +237,8 @@ def query_exchange_position_size(
             qty = position_base_qty_for_side(p, side)
             if qty > 0:
                 return qty
+    if strict:
+        raise RuntimeError(f"position_query_not_supported:{type(client).__name__}")
     return 0.0
 
 

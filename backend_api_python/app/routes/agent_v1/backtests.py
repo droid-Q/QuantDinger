@@ -1,14 +1,13 @@
-"""Async backtest endpoints (class B).
+﻿"""Async V2 backtest endpoints (class B).
 
-Submit returns a job_id; the agent polls /jobs/{id} until done.  We delegate
-to the existing BacktestService so results match the human UI exactly.
+Submit returns a job_id; the agent polls /jobs/{id} until done. This endpoint
+uses the same V2 execution model as the human Backtest Center.
 """
 from __future__ import annotations
 
 from typing import Any
 
-from app.services.backtest import BacktestService
-from app.services.backtest_limits import validate_backtest_range
+from app.services.strategy_v2 import StrategyV2BacktestService
 from app.utils.agent_auth import (
     SCOPE_B, agent_required, current_token, current_user_id,
     instrument_allowed, market_allowed, with_idempotency,
@@ -22,7 +21,95 @@ from ._helpers import envelope, error, get_json_or_400
 from ._security import assert_indicator_code_size
 
 logger = get_logger(__name__)
-_backtest = BacktestService()
+_backtest = StrategyV2BacktestService()
+_BACKTEST_FIELDS = {
+    "code", "startDate", "endDate", "initialCapital", "commission", "slippage",
+    "leverageEnabled", "leverage", "params",
+}
+
+
+def _token_has_restricted_allowlist(field: str) -> bool:
+    raw = str(current_token().get(field) or "*").strip()
+    return raw not in {"", "*"}
+
+
+def _validate_request(body: dict) -> tuple[Any, Any]:
+    unsupported = sorted(set(body) - _BACKTEST_FIELDS)
+    if unsupported:
+        return None, error(400, f"Unsupported backtest fields: {', '.join(unsupported)}")
+    code = str(body.get("code") or "").strip()
+    if not code:
+        return None, error(400, "code is required")
+    try:
+        assert_indicator_code_size(code)
+    except ValueError as exc:
+        return None, error(400, str(exc))
+
+    try:
+        start_date = _parse_date(body.get("startDate"))
+        end_date = _parse_date(body.get("endDate"))
+    except ValueError as exc:
+        return None, error(400, str(exc))
+    if not start_date or not end_date:
+        return None, error(400, "startDate and endDate are required (YYYY-MM-DD)")
+    if end_date < start_date:
+        return None, error(400, "endDate must not be earlier than startDate")
+
+    params = body.get("params", {})
+    if not isinstance(params, dict):
+        return None, error(400, "params must be an object")
+    try:
+        if float(body.get("initialCapital") or 10000) <= 0:
+            raise ValueError
+    except (TypeError, ValueError):
+        return None, error(400, "initialCapital must be a positive number")
+
+    try:
+        from app.services.strategy_v2 import compile_strategy_v2
+
+        program = compile_strategy_v2(code)
+        manifest = program.manifest
+        metadata = manifest.metadata()
+    except Exception as exc:
+        return None, error(400, str(exc), http=400)
+
+    for market in manifest.markets:
+        if not market_allowed(market):
+            return None, error(403, f"Market not allowed: {market}", http=403)
+
+    instruments: list[dict] = list((metadata.get("universe") or {}).get("instruments") or [])
+    for subscription in metadata.get("subscriptions") or []:
+        instruments.extend(subscription.get("instruments") or [])
+    if isinstance(metadata.get("benchmark"), dict):
+        instruments.append(metadata["benchmark"])
+
+    seen: set[tuple[str, str]] = set()
+    for instrument in instruments:
+        market = str(instrument.get("market") or "")
+        symbol = str(instrument.get("symbol") or "")
+        key = (market, symbol)
+        if key in seen:
+            continue
+        seen.add(key)
+        if market and not market_allowed(market):
+            return None, error(403, f"Market not allowed: {market}", http=403)
+        if symbol and not instrument_allowed(symbol):
+            return None, error(403, f"Instrument not allowed: {symbol}", http=403)
+
+    universe = metadata.get("universe") or {}
+    dynamic_references = [str(universe.get("reference") or "").strip()]
+    dynamic_references.extend(
+        str(item.get("universeReference") or "").strip()
+        for item in metadata.get("subscriptions") or []
+    )
+    if any(dynamic_references) and _token_has_restricted_allowlist("instruments"):
+        return None, error(
+            403,
+            "Dynamic universes require an unrestricted instrument allowlist",
+            http=403,
+        )
+
+    return program, None
 
 
 def _parse_date(s: Any) -> Any:
@@ -41,77 +128,43 @@ def _parse_date(s: Any) -> Any:
 
 
 def _run_backtest(payload: dict) -> Any:
-    """Adapter: call BacktestService.run_aligned with the agent payload shape."""
+    """Run the canonical Strategy API backtest from an agent job."""
     from app.services.backtest_execution import (
+        default_commission_if_missing,
         default_slippage_if_missing,
-        merge_strict_mode_into_strategy_config,
-        parse_strict_mode,
     )
 
-    code = (payload.get("code") or payload.get("indicator_code") or "").strip()
+    code = str(payload.get("code") or "").strip()
     if not code:
-        raise ValueError("code (indicator code) is required")
+        raise ValueError("code is required")
 
-    market = payload.get("market") or "Crypto"
-    symbol = payload.get("symbol")
-    timeframe = payload.get("timeframe") or "1D"
-    market_type = str(payload.get("marketType") or payload.get("market_type") or "").strip().lower()
-    if market_type in ("futures", "future", "perp", "perpetual"):
-        market_type = "swap"
-    if market_type not in ("spot", "swap"):
-        market_type = ""
-    exchange_id = str(payload.get("exchangeId") or payload.get("exchange_id") or "").strip().lower()
-    if not symbol:
-        raise ValueError("symbol is required")
-
-    start_date = _parse_date(payload.get("start_date") or payload.get("startDate"))
-    end_date = _parse_date(payload.get("end_date") or payload.get("endDate"))
+    start_date = _parse_date(payload.get("startDate"))
+    end_date = _parse_date(payload.get("endDate"))
     if not start_date or not end_date:
         raise ValueError("start_date and end_date are required (YYYY-MM-DD)")
-
-    strict_mode = parse_strict_mode(
-        payload.get("strictMode", payload.get("strict_mode")),
-        default=True,
-    )
-    strategy_config = merge_strict_mode_into_strategy_config(
-        payload.get("strategy_config") or payload.get("strategyConfig") or {},
-        strict_mode,
-    )
-    indicator_params = payload.get("indicator_params") or payload.get("params") or {}
-    warmup_bars = _backtest._estimate_warmup_bars(code, indicator_params)
-    range_error = validate_backtest_range(
-        market=market,
-        symbol=symbol,
-        timeframe=timeframe,
-        start_date=start_date,
-        end_date=end_date.replace(hour=23, minute=59, second=59),
-        warmup_bars=warmup_bars,
-    )
-    if range_error:
-        raise ValueError(range_error["msg"])
-
-    return _backtest.run_aligned(
-        strict_mode=strict_mode,
-        indicator_code=code,
-        market=market,
-        symbol=symbol,
-        timeframe=timeframe,
-        start_date=start_date,
-        end_date=end_date.replace(hour=23, minute=59, second=59),
-        initial_capital=float(payload.get("initial_capital") or payload.get("initialCapital") or 10000),
-        commission=float(payload.get("commission") or 0.001),
-        slippage=default_slippage_if_missing(payload.get("slippage")),
-        leverage=int(payload.get("leverage") or 1),
-        trade_direction=payload.get("trade_direction") or payload.get("tradeDirection") or "long",
-        strategy_config=strategy_config,
-        indicator_params=indicator_params,
+    params = payload.get("params") or {}
+    initial_capital = float(payload.get("initialCapital") or 10000)
+    commission = default_commission_if_missing(payload.get("commission"))
+    slippage = default_slippage_if_missing(payload.get("slippage"))
+    leverage_enabled = bool(payload.get("leverageEnabled"))
+    leverage = float(payload.get("leverage") or 1) if leverage_enabled else 1.0
+    _, result = _backtest.run(
         user_id=int(payload.get("__user_id") or 1),
-        market_type=market_type or None,
-        exchange_id=exchange_id or None,
+        code=code,
+        start_date=start_date,
+        end_date=end_date.replace(hour=23, minute=59, second=59),
+        initial_capital=initial_capital,
+        leverage_enabled=leverage_enabled,
+        leverage=leverage,
+        commission=commission,
+        slippage=slippage,
+        params=params if isinstance(params, dict) else {},
+        persist=False,
     )
+    return result
 
 
-@agent_v1_bp.route("/backtests", methods=["POST"])
+@agent_v1_bp.route("/backtest/run", methods=["POST"])
 @agent_required(SCOPE_B)
 def create_backtest():
     """Submit a backtest job. Returns 202 with `job_id` for polling."""
@@ -119,18 +172,9 @@ def create_backtest():
     if err:
         return err
 
-    market = body.get("market") or "Crypto"
-    symbol = body.get("symbol")
-    code = (body.get("code") or body.get("indicator_code") or "").strip()
-    if code:
-        try:
-            assert_indicator_code_size(code)
-        except ValueError as ve:
-            return error(400, str(ve))
-    if not market_allowed(market):
-        return error(403, f"Market not allowed: {market}", http=403)
-    if symbol and not instrument_allowed(symbol):
-        return error(403, f"Instrument not allowed: {symbol}", http=403)
+    _, validation_error = _validate_request(body)
+    if validation_error:
+        return validation_error
 
     with with_idempotency("backtest") as existing:
         if existing:
