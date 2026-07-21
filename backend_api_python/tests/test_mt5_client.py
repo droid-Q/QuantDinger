@@ -5,8 +5,10 @@ from collections import namedtuple
 from flask import Flask, g
 
 from app.routes import mt5 as mt5_routes
+from app.services.live_trading.base import LiveTradingError
 from app.services.mt5_trading import client as mt5_client_module
 from app.services.mt5_trading.client import MT5Client, MT5Config
+from app.services.pending_orders import live_order_phases
 
 
 def _fake_mt5():
@@ -104,6 +106,42 @@ def test_mt5_client_kline_accepts_numpy_like_rows(monkeypatch):
     client = MT5Client(MT5Config(login=1, password="pw", server="CPT-Demo"))
     assert client.connect() is True
     assert len(client.get_kline("XAUUSD", "1h", 2)) == 2
+
+
+def test_mt5_rejected_order_is_not_reported_as_fill(monkeypatch):
+    fake = _fake_mt5()
+    Result = namedtuple("Result", "retcode order deal volume price comment")
+    fake.order_send = lambda request: Result(10027, 0, 0, request.get("volume"), request.get("price"), "AutoTrading disabled")
+    monkeypatch.setitem(sys.modules, "MetaTrader5", fake)
+    monkeypatch.setattr(mt5_client_module, "_mt5", None)
+
+    client = MT5Client(MT5Config(login=1, password="pw", server="CPT-Demo"))
+    result = client.place_market_order("XAUUSD", "buy", 0.02)
+
+    assert result.success is False
+    assert result.filled == 0
+    assert result.avg_price == 0
+    try:
+        live_order_phases.place_live_market_order(
+            client=client,
+            symbol="XAUUSD",
+            side="buy",
+            amount=0.02,
+            reduce_only=False,
+            pos_side="long",
+            client_order_id="oid",
+            market_type="spot",
+            payload={},
+            exchange_config={},
+            leverage=1,
+            ref_price=2300,
+            spot_quote_amt=0,
+            spot_market_buy_uses_quote=False,
+        )
+    except LiveTradingError as exc:
+        assert "AutoTrading disabled" in str(exc)
+    else:
+        raise AssertionError("expected rejected MT5 order to fail")
 
 
 def test_mt5_connect_accepts_saved_credential_id(monkeypatch):

@@ -121,11 +121,11 @@ def test_mt5_live_order_phases_route_to_client(monkeypatch):
 
         def place_limit_order(self, **kwargs):
             self.calls["limit"] = kwargs
-            return type("Result", (), {"exchange_order_id": "limit-1", "raw": kwargs})()
+            return type("Result", (), {"success": True, "exchange_order_id": "limit-1", "raw": kwargs})()
 
         def place_market_order(self, **kwargs):
             self.calls["market"] = kwargs
-            return type("Result", (), {"exchange_order_id": "market-1", "raw": kwargs})()
+            return type("Result", (), {"success": True, "exchange_order_id": "market-1", "raw": kwargs})()
 
         def wait_for_fill(self, **kwargs):
             self.calls["wait"] = kwargs

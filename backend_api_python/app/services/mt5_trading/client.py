@@ -354,19 +354,21 @@ class MT5Client:
         raw = _as_dict(result)
         raw["order_check"] = check_raw
         retcode = int(raw.get("retcode") or 0)
-        ok_codes = {
+        fill_codes = {
             getattr(mt5, "TRADE_RETCODE_DONE", 10009),
-            getattr(mt5, "TRADE_RETCODE_PLACED", 10008),
             getattr(mt5, "TRADE_RETCODE_DONE_PARTIAL", 10010),
         }
+        ok_codes = fill_codes | {getattr(mt5, "TRADE_RETCODE_PLACED", 10008)}
         success = retcode in ok_codes
+        filled = _num(raw.get("volume") or request.get("volume")) if retcode in fill_codes else 0.0
+        avg_price = _num(raw.get("price") or request.get("price")) if filled > 0 else 0.0
         order_id = str(raw.get("order") or raw.get("deal") or "")
         return OrderResult(
             success=success,
             order_id=order_id,
-            filled=_num(raw.get("volume") or request.get("volume")),
-            avg_price=_num(raw.get("price") or request.get("price")),
-            status="filled" if success else "rejected",
+            filled=filled,
+            avg_price=avg_price,
+            status="filled" if retcode in fill_codes else ("placed" if success else "rejected"),
             message=str(raw.get("comment") or check_raw.get("comment") or ("success" if success else f"MT5 retcode {retcode}")),
             raw=raw,
         )

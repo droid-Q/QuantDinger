@@ -31,6 +31,12 @@ def _snapshot_get(snapshot: Any, key: str) -> Any:
     return getattr(snapshot, key, None)
 
 
+def _require_mt5_order_success(result: Any) -> Any:
+    if not bool(getattr(result, "success", False)):
+        raise LiveTradingError(str(getattr(result, "message", "") or "MT5 order rejected"))
+    return result
+
+
 def apply_fill_snapshot(fills: FillAccumulator, snapshot: Any) -> None:
     fills.apply_fill(float(_snapshot_get(snapshot, "filled") or 0.0), float(_snapshot_get(snapshot, "avg_price") or 0.0))
     fills.apply_fee(float(_snapshot_get(snapshot, "fee") or 0.0), str(_snapshot_get(snapshot, "fee_ccy") or ""))
@@ -192,7 +198,9 @@ def place_live_limit_order(
             client_order_id=client_order_id,
         )
     if isinstance(client, MT5Client):
-        return client.place_limit_order(symbol=str(symbol), side=side, size=amount, price=price, client_order_id=client_order_id)
+        return _require_mt5_order_success(
+            client.place_limit_order(symbol=str(symbol), side=side, size=amount, price=price, client_order_id=client_order_id)
+        )
     raise LiveTradingError(f"Unsupported client type: {type(client)}")
 
 
@@ -453,11 +461,13 @@ def place_live_market_order(
             client_order_id=client_order_id,
         )
     if isinstance(client, MT5Client):
-        return client.place_market_order(
-            symbol=str(symbol),
-            side=side,
-            quantity=amount,
-            client_order_id=client_order_id,
-            reduce_only=reduce_only,
+        return _require_mt5_order_success(
+            client.place_market_order(
+                symbol=str(symbol),
+                side=side,
+                quantity=amount,
+                client_order_id=client_order_id,
+                reduce_only=reduce_only,
+            )
         )
     raise LiveTradingError(f"Unsupported client type: {type(client)}")
