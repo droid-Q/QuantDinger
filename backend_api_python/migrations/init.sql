@@ -1086,6 +1086,12 @@ CREATE TABLE IF NOT EXISTS qd_backtest_runs (
     created_at TIMESTAMP DEFAULT NOW()
 );
 
+-- Upgrade pre-Strategy-V2 installations before creating indexes or persisting runs.
+ALTER TABLE qd_backtest_runs ADD COLUMN IF NOT EXISTS source_id INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE qd_backtest_runs ADD COLUMN IF NOT EXISTS market_type VARCHAR(20) NOT NULL DEFAULT 'spot';
+ALTER TABLE qd_backtest_runs ADD COLUMN IF NOT EXISTS params_json TEXT NOT NULL DEFAULT '{}';
+ALTER TABLE qd_backtest_runs ADD COLUMN IF NOT EXISTS manifest_json TEXT NOT NULL DEFAULT '{}';
+
 CREATE INDEX IF NOT EXISTS idx_backtest_runs_user_id ON qd_backtest_runs(user_id);
 CREATE INDEX IF NOT EXISTS idx_backtest_runs_strategy_id ON qd_backtest_runs(strategy_id);
 CREATE INDEX IF NOT EXISTS idx_backtest_runs_source_id ON qd_backtest_runs(source_id);
@@ -1675,6 +1681,14 @@ CREATE TABLE IF NOT EXISTS strategy_order_intents (
     updated_at TIMESTAMP NOT NULL DEFAULT NOW(),
     UNIQUE(strategy_run_id, idempotency_key)
 );
+
+ALTER TABLE strategy_order_intents ADD COLUMN IF NOT EXISTS portfolio_id VARCHAR(96) NOT NULL DEFAULT '';
+ALTER TABLE strategy_order_intents ADD COLUMN IF NOT EXISTS universe_id VARCHAR(96) NOT NULL DEFAULT '';
+ALTER TABLE strategy_order_intents ADD COLUMN IF NOT EXISTS rebalance_group_id VARCHAR(128) NOT NULL DEFAULT '';
+ALTER TABLE strategy_order_intents ADD COLUMN IF NOT EXISTS target_weight DECIMAL(18, 10);
+ALTER TABLE strategy_order_intents ADD COLUMN IF NOT EXISTS target_notional DECIMAL(28, 12);
+ALTER TABLE strategy_order_intents ADD COLUMN IF NOT EXISTS target_position_qty DECIMAL(28, 12);
+
 CREATE INDEX IF NOT EXISTS idx_strategy_order_intents_strategy ON strategy_order_intents(strategy_id, status);
 
 CREATE TABLE IF NOT EXISTS strategy_order_fills (

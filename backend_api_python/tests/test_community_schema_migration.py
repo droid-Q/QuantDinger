@@ -29,6 +29,24 @@ def test_existing_script_source_tables_receive_asset_type_before_index():
     assert sql.index(asset_upgrade) < sql.index(asset_index)
 
 
+def test_existing_strategy_runtime_tables_receive_columns_before_indexes():
+    sql = MIGRATION.read_text(encoding="utf-8")
+    upgrades = (
+        (
+            "ALTER TABLE qd_backtest_runs ADD COLUMN IF NOT EXISTS source_id",
+            "CREATE INDEX IF NOT EXISTS idx_backtest_runs_source_id",
+        ),
+        (
+            "ALTER TABLE strategy_order_intents ADD COLUMN IF NOT EXISTS portfolio_id",
+            "CREATE INDEX IF NOT EXISTS idx_strategy_order_intents_strategy",
+        ),
+    )
+
+    for upgrade, index in upgrades:
+        assert upgrade in sql
+        assert sql.index(upgrade) < sql.index(index)
+
+
 def test_author_published_surfaces_database_errors(monkeypatch):
     def fail_connection():
         raise RuntimeError("schema mismatch")
