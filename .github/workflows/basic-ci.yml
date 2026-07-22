@@ -1,10 +1,7 @@
 name: Backend CI
 
 on:
-  push:
-    branches: [main, master, v5.0.1-bate]
-  pull_request:
-    branches: [main, master]
+  workflow_dispatch:
 
 concurrency:
   group: backend-ci-${{ github.ref }}

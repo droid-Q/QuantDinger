@@ -1,24 +1,7 @@
 name: OpenAPI CI
 
 on:
-  push:
-    branches: [main, master]
-    paths:
-      - 'backend_api_python/app/openapi/**'
-      - 'backend_api_python/scripts/export_openapi.py'
-      - 'docs/api/**'
-      - 'docs/agent/agent-openapi.json'
-      - '.spectral.yaml'
-      - '.github/workflows/openapi-ci.yml'
-  pull_request:
-    branches: [main, master]
-    paths:
-      - 'backend_api_python/app/openapi/**'
-      - 'backend_api_python/scripts/export_openapi.py'
-      - 'docs/api/**'
-      - 'docs/agent/agent-openapi.json'
-      - '.spectral.yaml'
-      - '.github/workflows/openapi-ci.yml'
+  workflow_dispatch:
 
 concurrency:
   group: openapi-ci-${{ github.ref }}

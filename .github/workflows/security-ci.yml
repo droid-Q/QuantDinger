@@ -1,12 +1,7 @@
 name: Security CI
 
 on:
-  push:
-    branches: [main, master, v5.0.1-bate]
-  pull_request:
-    branches: [main, master]
-  schedule:
-    - cron: '17 3 * * 1'
+  workflow_dispatch:
 
 concurrency:
   group: security-ci-${{ github.ref }}

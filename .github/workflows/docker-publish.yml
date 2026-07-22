@@ -5,10 +5,7 @@ name: Publish backend image to GHCR
 # The frontend image is built and released independently by the private
 # QuantDinger-Vue repo (see its release-frontend.yml).
 #
-# Triggers:
-#   - push of a version tag matching `v*` (e.g. v5.0.1) → publishes
-#     semver + latest tags AND a GitHub Release
-#   - manual workflow_dispatch → publishes only a short-SHA tag, no Release
+# Triggered manually from GitHub Actions. Automatic tag builds are disabled.
 #
 # Multi-arch (linux/amd64 + linux/arm64) via QEMU + buildx. BUILD_REGION=global
 # keeps the GitHub-hosted runner off the Aliyun mirror detour.
@@ -18,9 +15,6 @@ name: Publish backend image to GHCR
 # and set package visibility to public if anonymous `docker pull` is desired.
 
 on:
-  push:
-    tags:
-      - 'v*'
   workflow_dispatch:
 
 # Cancel an in-flight build when a newer tag/dispatch lands on the same ref.
