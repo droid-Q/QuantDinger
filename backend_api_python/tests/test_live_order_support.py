@@ -139,7 +139,7 @@ def test_mt5_live_order_phases_route_to_client(monkeypatch):
     monkeypatch.setattr(live_order_phases, "MT5Client", FakeMT5Client)
     client = FakeMT5Client()
 
-    live_order_phases.place_live_limit_order(
+    limit_result = live_order_phases.place_live_limit_order(
         client=client,
         symbol="XAUUSD",
         side="buy",
@@ -150,11 +150,11 @@ def test_mt5_live_order_phases_route_to_client(monkeypatch):
         client_order_id="oid-limit",
         market_type="spot",
         payload={},
-        exchange_config={},
+        exchange_config={"exchange_id": "cptmarkets"},
         leverage=1,
         order_mode="maker_then_market",
     )
-    live_order_phases.place_live_market_order(
+    market_result = live_order_phases.place_live_market_order(
         client=client,
         symbol="XAUUSD",
         side="sell",
@@ -164,7 +164,7 @@ def test_mt5_live_order_phases_route_to_client(monkeypatch):
         client_order_id="oid-market",
         market_type="spot",
         payload={},
-        exchange_config={},
+        exchange_config={"exchange_id": "cptmarkets"},
         leverage=1,
         ref_price=2001,
         spot_quote_amt=0,
@@ -198,6 +198,10 @@ def test_mt5_live_order_phases_route_to_client(monkeypatch):
     }
     assert client.calls["market"]["quantity"] == 0.1
     assert client.calls["market"]["reduce_only"] is True
+    assert limit_result.exchange_id == "cptmarkets"
+    assert limit_result.exchange_order_id == "limit-1"
+    assert market_result.exchange_id == "cptmarkets"
+    assert market_result.exchange_order_id == "market-1"
     assert client.calls["wait"]["order_id"] == "limit-1"
     assert snapshot["filled"] == 1
     assert cancelled is True

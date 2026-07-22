@@ -8,7 +8,7 @@ from __future__ import annotations
 
 from typing import Any, Dict
 
-from app.services.live_trading.base import LiveTradingError
+from app.services.live_trading.base import LiveOrderResult, LiveTradingError
 from app.services.live_trading.binance import BinanceFuturesClient
 from app.services.live_trading.binance_spot import BinanceSpotClient
 from app.services.live_trading.bitget import BitgetMixClient
@@ -31,10 +31,23 @@ def _snapshot_get(snapshot: Any, key: str) -> Any:
     return getattr(snapshot, key, None)
 
 
-def _require_mt5_order_success(result: Any) -> Any:
+def _require_mt5_order_success(result: Any, *, exchange_id: str) -> LiveOrderResult:
     if not bool(getattr(result, "success", False)):
         raise LiveTradingError(str(getattr(result, "message", "") or "MT5 order rejected"))
-    return result
+    raw = getattr(result, "raw", {})
+    return LiveOrderResult(
+        exchange_id=str(exchange_id or "mt5"),
+        exchange_order_id=str(
+            getattr(result, "exchange_order_id", "") or getattr(result, "order_id", "") or ""
+        ),
+        filled=float(getattr(result, "filled", 0.0) or 0.0),
+        avg_price=float(getattr(result, "avg_price", 0.0) or 0.0),
+        raw={
+            "status": str(getattr(result, "status", "") or ""),
+            "message": str(getattr(result, "message", "") or ""),
+            "raw": raw if isinstance(raw, dict) else {"raw": raw},
+        },
+    )
 
 
 def apply_fill_snapshot(fills: FillAccumulator, snapshot: Any) -> None:
@@ -199,7 +212,8 @@ def place_live_limit_order(
         )
     if isinstance(client, MT5Client):
         return _require_mt5_order_success(
-            client.place_limit_order(symbol=str(symbol), side=side, size=amount, price=price, client_order_id=client_order_id)
+            client.place_limit_order(symbol=str(symbol), side=side, size=amount, price=price, client_order_id=client_order_id),
+            exchange_id=str(exchange_config.get("exchange_id") or "mt5"),
         )
     raise LiveTradingError(f"Unsupported client type: {type(client)}")
 
@@ -468,6 +482,7 @@ def place_live_market_order(
                 quantity=amount,
                 client_order_id=client_order_id,
                 reduce_only=reduce_only,
-            )
+            ),
+            exchange_id=str(exchange_config.get("exchange_id") or "mt5"),
         )
     raise LiveTradingError(f"Unsupported client type: {type(client)}")
