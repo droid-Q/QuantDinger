@@ -405,6 +405,19 @@ def handle_data(context, data):
     assert manifest.metadata()["directionMode"] == "both"
 
 
+def test_forex_direction_is_not_forced_to_long_only():
+    code = """
+def initialize(context):
+    context.set_universe(["Forex:XAUUSD"])
+    context.subscribe(frequency="1h")
+
+def handle_data(context, data):
+    pass
+"""
+
+    assert compile_strategy_v2(code).manifest.direction_mode == ""
+
+
 @pytest.mark.parametrize(
     "strategy_body,expected",
     [

@@ -23,6 +23,7 @@ class LiveOrderRequest:
     signal_timestamp: int
     market_type: str
     execution_mode: str
+    market_category: str = ""
     leverage: float = 1.0
     reason: str = ""
     notification_config: dict[str, Any] | None = None
@@ -79,6 +80,7 @@ class StrategyV2OrderGateway:
             "symbol": request.symbol,
             "signal_type": request.action,
             "market_type": request.market_type,
+            "market_category": request.market_category,
             "amount": request.quantity,
             "price": request.limit_price or request.reference_price,
             "ref_price": request.reference_price,
@@ -170,7 +172,12 @@ class StrategyV2OrderGateway:
             raise ValueError("strategyV2.invalidOrderSize")
         if request.execution_mode not in {"signal", "live"}:
             raise ValueError("strategyV2.invalidExecutionMode")
-        if request.market_type == "spot" and "short" in request.action:
+        market_category = str(request.market_category or "").strip().lower()
+        if (
+            request.market_type == "spot"
+            and market_category not in {"forex", "mt5"}
+            and "short" in request.action
+        ):
             raise ValueError("strategyV2.spotShortUnsupported")
         if request.order_type not in {"market", "limit"}:
             raise ValueError("strategyV2.orderTypeUnsupported")

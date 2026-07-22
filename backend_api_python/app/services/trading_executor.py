@@ -321,6 +321,7 @@ class TradingExecutor:
                     signal_timestamp=signal_ts,
                     market_type=str(row.get("market_type") or strategy.get("market_type") or "swap"),
                     execution_mode="live",
+                    market_category=str(strategy.get("market_category") or ""),
                     leverage=leverage,
                     reason="user_stop_and_close",
                     notification_config=notification_config,
@@ -694,6 +695,7 @@ class TradingExecutor:
             for item in positions
         )
         market_type = str(member.get("market_type") or "spot").lower()
+        market_category = str(member.get("market") or "").strip()
         target_amount = self._target_amount(
             intent,
             current_amount,
@@ -702,7 +704,11 @@ class TradingExecutor:
             leverage=leverage,
             market_type=market_type,
         )
-        if market_type == "spot" and target_amount < -1e-12:
+        if (
+            market_type == "spot"
+            and market_category.lower() not in {"forex", "mt5"}
+            and target_amount < -1e-12
+        ):
             raise RuntimeError("strategyV2.spotShortUnsupported")
 
         closes_position = abs(target_amount) <= 1e-12 and abs(current_amount) > 1e-12
@@ -723,7 +729,7 @@ class TradingExecutor:
                 leverage=leverage,
                 initial_capital=initial_capital,
                 market_type=market_type,
-                market_category=str(member.get("market") or ""),
+                market_category=market_category,
                 execution_mode=execution_mode,
                 notification_config=notification_config,
                 trading_config=trading_config,
@@ -765,6 +771,7 @@ class TradingExecutor:
             signal_timestamp=int(values.get("signal_ts") or time.time()),
             market_type=str(values.get("market_type") or "spot"),
             execution_mode=str(values.get("execution_mode") or "signal"),
+            market_category=str(values.get("market_category") or ""),
             leverage=leverage,
             reason=str(values.get("signal_reason") or ""),
             notification_config=dict(values.get("notification_config") or {}),

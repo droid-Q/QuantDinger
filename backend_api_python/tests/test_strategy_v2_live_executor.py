@@ -1,6 +1,7 @@
 import pandas as pd
 
 from app.services.strategy_v2 import OrderIntent
+from app.services.strategy_v2.live_execution import LiveOrderRequest, StrategyV2OrderGateway
 from app.services.trading_executor import TradingExecutor, live_history_days
 
 
@@ -44,6 +45,16 @@ def _member() -> dict:
     }
 
 
+def _forex_member() -> dict:
+    return {
+        "key": "Forex:XAUUSD",
+        "market": "Forex",
+        "symbol": "XAUUSD",
+        "exchange_id": "cptmarkets",
+        "market_type": "spot",
+    }
+
+
 def test_target_percent_opens_position_with_explicit_quantity():
     executor = TradingExecutor.__new__(TradingExecutor)
     executor._get_current_positions = lambda *_args: []
@@ -78,6 +89,63 @@ def test_target_percent_opens_position_with_explicit_quantity():
     assert captured["market_type"] == "swap"
     assert captured["price_exchange_id"] == "okx"
     assert captured["strategy_run_id"] == 42
+
+
+def test_mt5_forex_spot_can_open_short():
+    executor = TradingExecutor.__new__(TradingExecutor)
+    executor._get_current_positions = lambda *_args: []
+    captured = {}
+    executor._execute_signal = lambda **kwargs: captured.update(kwargs) or True
+    member = _forex_member()
+
+    result = executor._execute_strategy_v2_intent(
+        strategy_id=10,
+        strategy_name="MT5 short",
+        intent=OrderIntent(
+            symbol=member["key"],
+            kind="target_quantity",
+            value=-0.01,
+            position_side="short",
+        ),
+        frames={member["key"]: _frame(price=4000.0)},
+        candidates=[member],
+        initial_capital=10_000.0,
+        leverage=1.0,
+        execution_mode="live",
+        notification_config={},
+        trading_config={},
+        exchange_config={"exchange_id": "cptmarkets"},
+        signal_ts=3,
+        strategy_run_id=44,
+    )
+
+    assert result is True
+    assert captured["signal_type"] == "open_short"
+    assert captured["market_category"] == "Forex"
+
+
+def test_order_gateway_allows_only_forex_spot_short():
+    common = dict(
+        strategy_id=10,
+        strategy_run_id=44,
+        user_id=1,
+        symbol="XAUUSD",
+        action="open_short",
+        quantity=0.01,
+        reference_price=4000.0,
+        signal_timestamp=3,
+        market_type="spot",
+        execution_mode="live",
+    )
+
+    request = LiveOrderRequest(**common, market_category="Forex")
+    assert StrategyV2OrderGateway._validate(request) is request
+    try:
+        StrategyV2OrderGateway._validate(LiveOrderRequest(**common, market_category="Crypto"))
+    except ValueError as exc:
+        assert str(exc) == "strategyV2.spotShortUnsupported"
+    else:
+        raise AssertionError("Crypto spot short must remain blocked")
 
 
 def test_spot_target_percent_does_not_expand_with_leverage():
