@@ -2,11 +2,29 @@ import unittest
 from datetime import datetime, timezone
 from unittest.mock import MagicMock, patch
 
+import pandas as pd
+
 from app.services.live_trading.account_snapshot import fetch_account_snapshot
-from app.services.trading_executor import TradingExecutor, _frame_from_exchange_rows
+from app.services.strategy_v2.data import MultiAssetDataPortal
+from app.services.trading_executor import TradingExecutor, _frame_from_exchange_rows, _member_key
 
 
 class MT5RuntimePositionTest(unittest.TestCase):
+    def test_mt5_runtime_key_matches_strategy_portal_identity(self):
+        member = {
+            "market": "Forex",
+            "symbol": "XAUUSD",
+            "exchange_id": "cptmarkets",
+            "market_type": "spot",
+        }
+        key = _member_key(member)
+        frame = pd.DataFrame(
+            {"open": [1], "high": [1], "low": [1], "close": [1]},
+            index=[pd.Timestamp("2026-07-22T00:00:00Z")],
+        )
+
+        self.assertEqual(MultiAssetDataPortal({key: frame}).resolve_key("Forex:XAUUSD"), key)
+
     def test_explicit_position_ledger_overrides_legacy_dca_fallback(self):
         from app.services.live_trading.strategy_position_sync import strategy_uses_fill_ledger
 

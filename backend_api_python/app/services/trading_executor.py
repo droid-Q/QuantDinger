@@ -1513,6 +1513,8 @@ def _json_object(value: Any) -> dict[str, Any]:
 def _member_key(member: dict[str, Any]) -> str:
     market = str(member.get("market") or "")
     symbol = str(member.get("symbol") or "")
+    if market != "Crypto":
+        return f"{market}:{symbol}"
     exchange_id = str(member.get("exchange_id") or "")
     market_type = str(member.get("market_type") or "")
     suffix = f"@{exchange_id}" if exchange_id else ""
