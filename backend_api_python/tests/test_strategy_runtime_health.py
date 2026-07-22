@@ -59,3 +59,19 @@ def test_runtime_heartbeat_persists_loop_latency(monkeypatch):
     assert saved["values"]["last_heartbeat_at"] == 1784434455
     assert saved["values"]["loop_latency_ms"] == 41
     assert saved["values"]["latency_ms"] == 41
+
+
+def test_pending_order_health_only_counts_latest_runs(monkeypatch):
+    captured = {}
+
+    def query(sql, params):
+        captured["sql"] = sql
+        captured["params"] = params
+        return []
+
+    monkeypatch.setattr(health, "_query", query)
+
+    health._load_pending_orders({20: {"run_id": 7}}, "%s", [20])
+
+    assert "strategy_run_id IN (%s)" in captured["sql"]
+    assert captured["params"] == (20, 7)

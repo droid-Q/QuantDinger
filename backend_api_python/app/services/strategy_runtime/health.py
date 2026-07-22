@@ -196,6 +196,14 @@ def _load_latest_events(snapshots, placeholders, ids):
 
 
 def _load_pending_orders(snapshots, placeholders, ids):
+    run_ids = sorted({
+        int(snapshot.get("run_id") or 0)
+        for snapshot in snapshots.values()
+        if int(snapshot.get("run_id") or 0) > 0
+    })
+    if not run_ids:
+        return
+    run_placeholders = ",".join(["%s"] * len(run_ids))
     rows = _query(
         f"""
         SELECT strategy_id,
@@ -205,9 +213,10 @@ def _load_pending_orders(snapshots, placeholders, ids):
                MAX(signal_ts) AS last_signal_at
         FROM pending_orders
         WHERE strategy_id IN ({placeholders})
+          AND strategy_run_id IN ({run_placeholders})
         GROUP BY strategy_id
         """,
-        tuple(ids),
+        tuple(ids) + tuple(run_ids),
     )
     for row in rows:
         strategy_id = int(row.get("strategy_id") or 0)
