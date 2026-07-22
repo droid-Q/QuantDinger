@@ -89,7 +89,14 @@ def list_credentials():
         items = []
         for row in rows:
             item = dict(row or {})
-            if str(item.get('exchange_id') or '').strip().lower() not in {*CRYPTO_EXCHANGES, 'ibkr', 'alpaca'}:
+            if str(item.get('exchange_id') or '').strip().lower() not in {
+                *CRYPTO_EXCHANGES,
+                'ibkr',
+                'alpaca',
+                'mt5',
+                'cptmarkets',
+                'cpt_markets',
+            }:
                 continue
             item['enable_demo_trading'] = False
             item['environment'] = 'live'
