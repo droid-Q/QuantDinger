@@ -18,6 +18,33 @@ from app.utils.logger import get_logger
 logger = get_logger(__name__)
 
 
+def _ensure_script_source_schema() -> None:
+    with get_db_connection() as db:
+        cur = db.cursor()
+        cur.execute(
+            """
+            SELECT EXISTS (
+                SELECT 1
+                FROM information_schema.columns
+                WHERE table_schema = current_schema()
+                  AND table_name = 'qd_script_sources'
+                  AND column_name = 'asset_type'
+            ) AS present
+            """
+        )
+        if bool((cur.fetchone() or {}).get("present")):
+            cur.close()
+            return
+        cur.execute(
+            """
+            ALTER TABLE IF EXISTS qd_script_sources
+            ADD COLUMN IF NOT EXISTS asset_type VARCHAR(32) NOT NULL DEFAULT 'script'
+            """
+        )
+        db.commit()
+        cur.close()
+
+
 def _json_dict(value: Any) -> Dict[str, Any]:
     if isinstance(value, dict):
         return dict(value)
@@ -488,5 +515,6 @@ _service: Optional[ScriptSourceService] = None
 def get_script_source_service() -> ScriptSourceService:
     global _service
     if _service is None:
+        _ensure_script_source_schema()
         _service = ScriptSourceService()
     return _service

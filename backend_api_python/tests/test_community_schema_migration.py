@@ -20,6 +20,15 @@ def test_existing_indicator_tables_receive_marketplace_columns_before_indexes():
     assert sql.index(source_upgrade) < sql.index(source_index)
 
 
+def test_existing_script_source_tables_receive_asset_type_before_index():
+    sql = MIGRATION.read_text(encoding="utf-8")
+    asset_upgrade = "ALTER TABLE qd_script_sources\nADD COLUMN IF NOT EXISTS asset_type"
+    asset_index = "CREATE INDEX IF NOT EXISTS idx_script_sources_asset_type"
+
+    assert asset_upgrade in sql
+    assert sql.index(asset_upgrade) < sql.index(asset_index)
+
+
 def test_author_published_surfaces_database_errors(monkeypatch):
     def fail_connection():
         raise RuntimeError("schema mismatch")

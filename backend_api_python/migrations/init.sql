@@ -337,6 +337,9 @@ CREATE TABLE IF NOT EXISTS qd_script_sources (
     updated_at TIMESTAMP DEFAULT NOW()
 );
 
+ALTER TABLE qd_script_sources
+ADD COLUMN IF NOT EXISTS asset_type VARCHAR(32) NOT NULL DEFAULT 'script';
+
 CREATE INDEX IF NOT EXISTS idx_script_sources_user_id ON qd_script_sources(user_id);
 CREATE INDEX IF NOT EXISTS idx_script_sources_marketplace ON qd_script_sources(source_marketplace_indicator_id);
 CREATE INDEX IF NOT EXISTS idx_script_sources_asset_type ON qd_script_sources(user_id, asset_type);
