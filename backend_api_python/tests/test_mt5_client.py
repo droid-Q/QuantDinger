@@ -1,3 +1,4 @@
+import os
 import sys
 import types
 from collections import namedtuple
@@ -101,6 +102,7 @@ def test_mt5_client_market_and_reduce_only_orders(monkeypatch):
     status = client.get_connection_status()
     assert status["tradingReady"] is True
     assert status["terminal"]["dataPath"].endswith(r"MetaQuotes\Terminal\CPT")
+    assert status["terminal"]["backendPid"] == os.getpid()
     assert client.get_ticker("XAU/USD")["last"] == 2300.25
     assert len(client.get_kline("XAUUSD", "1H", 2)) == 2
 

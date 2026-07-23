@@ -44,6 +44,23 @@ function Require-Admin {
     }
 }
 
+function Get-InteractiveUser {
+    $sessionId = (Get-Process -Id $PID).SessionId
+    $explorer = Get-CimInstance Win32_Process -Filter "Name = 'explorer.exe'" | Where-Object {
+        $_.SessionId -eq $sessionId
+    } | Select-Object -First 1
+    if ($explorer) {
+        $owner = Invoke-CimMethod -InputObject $explorer -MethodName GetOwner
+        $user = "$($owner.Domain)\$($owner.User)"
+    } else {
+        $user = (Get-CimInstance Win32_ComputerSystem).UserName
+    }
+    if (-not $user -or $user -match "\\SYSTEM$") {
+        Fail "No interactive Windows user was found. Log in to the desktop account that configured MT5, then run this installer there."
+    }
+    return $user
+}
+
 function Set-EnvValue($Path, $Key, $Value) {
     if (-not (Test-Path $Path)) { New-Item -ItemType File -Path $Path -Force | Out-Null }
     $lines = @(Get-Content $Path)
@@ -232,7 +249,12 @@ function Install-BackendService {
 }
 
 function Install-BackendLogonTask {
-    $taskUser = [Security.Principal.WindowsIdentity]::GetCurrent().Name
+    $taskUser = Get-InteractiveUser
+    $taskSid = ([Security.Principal.NTAccount]$taskUser).Translate([Security.Principal.SecurityIdentifier]).Value
+    $taskProfile = Get-CimInstance Win32_UserProfile -Filter "SID = '$taskSid'"
+    if (-not $taskProfile.LocalPath) {
+        Fail "Windows profile not found for $taskUser."
+    }
     New-Item -ItemType Directory -Force -Path $LogsDir | Out-Null
 
     if (Get-ScheduledTask -TaskName $ServiceName -ErrorAction SilentlyContinue) {
@@ -269,7 +291,10 @@ function Install-BackendLogonTask {
 
     $runPy = Join-Path $BackendDir "run.py"
     $sessionLog = Join-Path $LogsDir "windows-session.log"
-    $command = "`$env:PYTHONUTF8='1'; `$env:PYTHONUNBUFFERED='1'; & '$VenvPython' '$runPy' *>> '$sessionLog'"
+    $profilePath = $taskProfile.LocalPath.Replace("'", "''")
+    $appDataPath = (Join-Path $taskProfile.LocalPath "AppData\Roaming").Replace("'", "''")
+    $localAppDataPath = (Join-Path $taskProfile.LocalPath "AppData\Local").Replace("'", "''")
+    $command = "`$env:USERPROFILE='$profilePath'; `$env:APPDATA='$appDataPath'; `$env:LOCALAPPDATA='$localAppDataPath'; `$env:PYTHONUTF8='1'; `$env:PYTHONUNBUFFERED='1'; & '$VenvPython' '$runPy' *>> '$sessionLog'"
     $arguments = "-NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -Command `"$command`""
     $action = New-ScheduledTaskAction -Execute "powershell.exe" -Argument $arguments -WorkingDirectory $BackendDir
     $trigger = New-ScheduledTaskTrigger -AtLogOn -User $taskUser
@@ -298,11 +323,13 @@ function Install-BackendLogonTask {
 }
 
 function Register-DockerStartupTask {
+    $taskUser = Get-InteractiveUser
     $script = $PSCommandPath
     $arguments = "-NoProfile -ExecutionPolicy Bypass -File `"$script`" -DockerOnly -ProjectRoot `"$ProjectRoot`" -BackendPort $BackendPort -DbPort $DbPort -RedisPort $RedisPort -FrontendPort $FrontendPort -MobilePort $MobilePort"
     $action = New-ScheduledTaskAction -Execute "powershell.exe" -Argument $arguments
-    $trigger = New-ScheduledTaskTrigger -AtLogOn -User "$env:USERDOMAIN\$env:USERNAME"
-    Register-ScheduledTask -TaskName "QuantDingerDockerServices" -Action $action -Trigger $trigger -Description "Start QuantDinger MT5 Docker services at logon." -Force | Out-Null
+    $trigger = New-ScheduledTaskTrigger -AtLogOn -User $taskUser
+    $principal = New-ScheduledTaskPrincipal -UserId $taskUser -LogonType Interactive -RunLevel Highest
+    Register-ScheduledTask -TaskName "QuantDingerDockerServices" -Action $action -Trigger $trigger -Principal $principal -Description "Start QuantDinger MT5 Docker services at logon." -Force | Out-Null
 }
 
 if (-not (Test-Path $ComposeFile)) { Fail "Missing $ComposeFile." }

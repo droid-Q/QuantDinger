@@ -7,6 +7,8 @@ deployments and tests can run without the optional Windows wheel.
 
 from __future__ import annotations
 
+import getpass
+import os
 import time
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional
@@ -236,6 +238,11 @@ class MT5Client:
             "commonDataPath": str(info.get("commondata_path") or ""),
             "name": str(info.get("name") or ""),
             "build": int(info.get("build") or 0),
+            "backendUser": getpass.getuser(),
+            "backendUserProfile": os.getenv("USERPROFILE", ""),
+            "backendAppData": os.getenv("APPDATA", ""),
+            "backendSession": os.getenv("SESSIONNAME", ""),
+            "backendPid": os.getpid(),
         }
 
     def get_account_summary(self) -> Dict[str, Any]:
