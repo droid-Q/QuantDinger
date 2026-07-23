@@ -249,9 +249,9 @@ function Install-BackendLogonTask {
         }
     }
 
-    $quote = { param($v) "'" + ($v -replace "'", "''") + "'" }
-    $args = "-NoProfile -ExecutionPolicy Bypass -File $(& $quote $PSCommandPath) -SessionRun -ProjectRoot $(& $quote $ProjectRoot) -BackendPort $BackendPort -DbPort $DbPort -RedisPort $RedisPort -FrontendPort $FrontendPort -MobilePort $MobilePort"
-    $action = New-ScheduledTaskAction -Execute "powershell.exe" -Argument $args
+    $script = $PSCommandPath
+    $arguments = "-NoProfile -ExecutionPolicy Bypass -File `"$script`" -SessionRun -ProjectRoot `"$ProjectRoot`" -BackendPort $BackendPort -DbPort $DbPort -RedisPort $RedisPort -FrontendPort $FrontendPort -MobilePort $MobilePort"
+    $action = New-ScheduledTaskAction -Execute "powershell.exe" -Argument $arguments
     $trigger = New-ScheduledTaskTrigger -AtLogOn -User $taskUser
     $principal = New-ScheduledTaskPrincipal -UserId $taskUser -LogonType Interactive -RunLevel Highest
     $settings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -StartWhenAvailable -ExecutionTimeLimit ([TimeSpan]::Zero) -RestartCount 3 -RestartInterval (New-TimeSpan -Minutes 1)
@@ -268,9 +268,8 @@ function Install-BackendLogonTask {
 
 function Register-DockerStartupTask {
     $script = $PSCommandPath
-    $quote = { param($v) "'" + ($v -replace "'", "''") + "'" }
-    $args = "-NoProfile -ExecutionPolicy Bypass -File $(& $quote $script) -DockerOnly -ProjectRoot $(& $quote $ProjectRoot) -BackendPort $BackendPort -DbPort $DbPort -RedisPort $RedisPort -FrontendPort $FrontendPort -MobilePort $MobilePort"
-    $action = New-ScheduledTaskAction -Execute "powershell.exe" -Argument $args
+    $arguments = "-NoProfile -ExecutionPolicy Bypass -File `"$script`" -DockerOnly -ProjectRoot `"$ProjectRoot`" -BackendPort $BackendPort -DbPort $DbPort -RedisPort $RedisPort -FrontendPort $FrontendPort -MobilePort $MobilePort"
+    $action = New-ScheduledTaskAction -Execute "powershell.exe" -Argument $arguments
     $trigger = New-ScheduledTaskTrigger -AtLogOn -User "$env:USERDOMAIN\$env:USERNAME"
     Register-ScheduledTask -TaskName "QuantDingerDockerServices" -Action $action -Trigger $trigger -Description "Start QuantDinger MT5 Docker services at logon." -Force | Out-Null
 }

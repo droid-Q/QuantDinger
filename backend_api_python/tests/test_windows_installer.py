@@ -16,3 +16,6 @@ def test_passwordless_mt5_backend_uses_interactive_logon_task():
     assert "-SessionRun" in script
     assert "$usePasswordless = -not $WindowsService" in script
     assert "if ($usePasswordless)" in script
+    assert script.count('-File `"$script`"') == 2
+    assert script.count('-ProjectRoot `"$ProjectRoot`"') == 2
+    assert "$quote =" not in script
