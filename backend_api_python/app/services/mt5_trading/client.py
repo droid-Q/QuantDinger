@@ -301,7 +301,7 @@ class MT5Client:
         tick = _as_dict(_ensure_mt5().symbol_info_tick(sym))
         bid = _num(tick.get("bid"))
         ask = _num(tick.get("ask"))
-        last = _num(tick.get("last")) or ((bid + ask) / 2 if bid > 0 and ask > 0 else bid or ask)
+        last = ((bid + ask) / 2) if bid > 0 and ask > 0 else bid or ask or _num(tick.get("last"))
         return {
             "symbol": sym,
             "last": last,

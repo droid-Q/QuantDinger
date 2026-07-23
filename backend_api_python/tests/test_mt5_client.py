@@ -128,6 +128,18 @@ def test_mt5_client_kline_accepts_numpy_like_rows(monkeypatch):
     assert len(client.get_kline("XAUUSD", "1h", 2)) == 2
 
 
+def test_mt5_ticker_prefers_bid_ask_when_last_trade_is_stale(monkeypatch):
+    fake = _fake_mt5()
+    Tick = namedtuple("Tick", "bid ask last time")
+    fake.symbol_info_tick = lambda symbol: Tick(4093.0, 4094.0, 4071.0, 1710000000)
+    monkeypatch.setitem(sys.modules, "MetaTrader5", fake)
+    monkeypatch.setattr(mt5_client_module, "_mt5", None)
+
+    client = MT5Client(MT5Config(login=1, password="pw", server="CPT-Demo"))
+
+    assert client.get_ticker("XAUUSD")["last"] == 4093.5
+
+
 def test_mt5_rejected_order_is_not_reported_as_fill(monkeypatch):
     fake = _fake_mt5()
     Result = namedtuple("Result", "retcode order deal volume price comment")
