@@ -386,3 +386,33 @@ def test_live_frame_latest_bar_is_aligned_to_execution_account_price():
         63_943.1,
         63_943.1,
     ]
+
+
+def test_live_order_uses_execution_price_without_mutating_closed_bar():
+    executor = TradingExecutor.__new__(TradingExecutor)
+    executor._get_current_positions = lambda *_args: []
+    captured = {}
+    executor._execute_signal = lambda **kwargs: captured.update(kwargs) or True
+    frame = _frame(price=64_294.6)
+    member = _member()
+    original = frame.copy(deep=True)
+
+    result = executor._execute_strategy_v2_intent(
+        strategy_id=7,
+        strategy_name="V2 CTA",
+        intent=OrderIntent(symbol=member["key"], kind="target_percent", value=0.25),
+        frames={member["key"]: frame},
+        candidates=[member],
+        initial_capital=10_000.0,
+        leverage=2.0,
+        execution_mode="live",
+        notification_config={},
+        trading_config={},
+        exchange_config={},
+        signal_ts=1,
+        current_price_override=63_943.1,
+    )
+
+    assert result is True
+    assert captured["current_price"] == 63_943.1
+    pd.testing.assert_frame_equal(frame, original)

@@ -1,5 +1,5 @@
 import unittest
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from unittest.mock import MagicMock, patch
 
 import pandas as pd
@@ -62,6 +62,21 @@ class MT5RuntimePositionTest(unittest.TestCase):
         self.assertEqual(len(frame), 2)
         self.assertEqual(float(frame.iloc[-1]["close"]), 2003.0)
 
+    def test_mt5_runtime_drops_the_current_unclosed_bar(self):
+        current_open = datetime(2026, 7, 23, 7, 19, tzinfo=timezone.utc)
+        closed_open = current_open - timedelta(minutes=1)
+        frame = _frame_from_exchange_rows(
+            [
+                {"time": int(closed_open.timestamp()), "open": 4100, "high": 4102, "low": 4099, "close": 4101},
+                {"time": int(current_open.timestamp()), "open": 4101, "high": 4103, "low": 4100, "close": 4102},
+            ],
+            closed_open - timedelta(minutes=1),
+            current_open + timedelta(seconds=4),
+            timeframe_seconds=60,
+        )
+
+        self.assertEqual(list(frame.index), [pd.Timestamp(closed_open).tz_localize(None)])
+
     def test_runtime_prices_use_bound_cptmarkets_client_for_forex(self):
         client = MagicMock()
         client.get_ticker.return_value = {"last": 4078.5}
@@ -74,7 +89,11 @@ class MT5RuntimePositionTest(unittest.TestCase):
             }
         ]
 
-        with patch.object(TradingExecutor, "_live_prices", return_value={}):
+        with patch.object(
+            TradingExecutor,
+            "_live_prices",
+            side_effect=AssertionError("MT5 prices must use the bound execution client"),
+        ):
             prices = TradingExecutor._execution_account_prices(
                 candidates,
                 {"exchange_id": "cptmarkets"},

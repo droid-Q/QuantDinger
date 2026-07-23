@@ -54,6 +54,8 @@ def _frame_from_exchange_rows(
     rows: list[dict[str, Any]],
     start_date: datetime,
     end_date: datetime,
+    *,
+    timeframe_seconds: int | None = None,
 ) -> pd.DataFrame:
     """Normalize direct broker candles to the Strategy V2 frame contract."""
     if not rows:
@@ -83,6 +85,8 @@ def _frame_from_exchange_rows(
         frame[column] = pd.to_numeric(frame[column], errors="coerce")
     start = pd.Timestamp(start_date).tz_convert(None) if pd.Timestamp(start_date).tzinfo else pd.Timestamp(start_date)
     end = pd.Timestamp(end_date).tz_convert(None) if pd.Timestamp(end_date).tzinfo else pd.Timestamp(end_date)
+    if timeframe_seconds is not None:
+        end -= pd.Timedelta(seconds=max(1, int(timeframe_seconds)))
     return frame.loc[(frame.index >= start) & (frame.index <= end)].dropna(subset=["close"])
 
 
@@ -424,7 +428,12 @@ class TradingExecutor:
                             int(end_date.timestamp()) + timeframe_seconds,
                             int(start_date.timestamp()),
                         )
-                        return _frame_from_exchange_rows(rows, start_date, end_date)
+                        return _frame_from_exchange_rows(
+                            rows,
+                            start_date,
+                            end_date,
+                            timeframe_seconds=timeframe_seconds,
+                        )
 
                     service.frame_fetcher = mt5_frame_fetcher
 
@@ -480,7 +489,10 @@ class TradingExecutor:
                     runtime_price_client,
                 )
 
-            if execution_mode == "live":
+            align_live_frames = (
+                execution_mode == "live" and account_exchange not in MT5_EXCHANGES
+            )
+            if align_live_frames:
                 frames = self._align_latest_frame_prices(frames, runtime_prices())
             initial_capital = float(
                 strategy.get("initial_capital") or trading_config.get("initial_capital") or 0
@@ -557,9 +569,10 @@ class TradingExecutor:
                 try:
                     positions = self._positions_by_symbol(strategy_id, candidates)
                     session.synchronize_positions(positions)
-                    last_prices.update(runtime_prices())
+                    current_prices = runtime_prices()
+                    last_prices.update(current_prices)
                     protection_intents = session.evaluate_protections(
-                        last_prices,
+                        current_prices,
                         timestamp=pd.Timestamp.now(tz="UTC"),
                     )
                     protected = {str(intent.symbol) for intent in protection_intents}
@@ -578,14 +591,14 @@ class TradingExecutor:
                             exchange_config=exchange_config,
                             signal_ts=int(time.time()),
                             strategy_run_id=run_id,
-                            current_price_override=last_prices.get(str(intent.symbol)),
+                            current_price_override=current_prices.get(str(intent.symbol)),
                         )
 
                     pending_count = len(protection_intents)
                     if cycle_started >= next_signal_poll:
                         frames = fetch_frames()
-                        if execution_mode == "live":
-                            frames = self._align_latest_frame_prices(frames, runtime_prices())
+                        if align_live_frames:
+                            frames = self._align_latest_frame_prices(frames, current_prices)
                         previous_timestamp = session.last_processed
                         intents, messages, timestamp = session.process(frames)
                         bar_advanced = (
@@ -611,6 +624,11 @@ class TradingExecutor:
                                 exchange_config=exchange_config,
                                 signal_ts=self._intent_signal_timestamp(intent, timestamp),
                                 strategy_run_id=run_id,
+                                current_price_override=(
+                                    current_prices.get(str(intent.symbol))
+                                    if execution_mode == "live"
+                                    else None
+                                ),
                             )
                             submitted_count += int(submitted)
                         if bar_advanced:
@@ -1440,7 +1458,8 @@ class TradingExecutor:
         exchange_config: dict[str, Any],
         client_holder: dict[str, Any],
     ) -> dict[str, float]:
-        prices = cls._live_prices(candidates)
+        exchange_id = str(exchange_config.get("exchange_id") or "").strip().lower()
+        prices = {} if exchange_id in MT5_EXCHANGES else cls._live_prices(candidates)
         try:
             from app.services.live_trading.factory import create_client
             from app.services.live_trading.symbols import to_okx_spot_inst_id, to_okx_swap_inst_id
@@ -1450,7 +1469,6 @@ class TradingExecutor:
             if client is None:
                 client = create_client(exchange_config, market_type=market_type)
                 client_holder["client"] = client
-            exchange_id = str(exchange_config.get("exchange_id") or "").strip().lower()
             for member in candidates:
                 member_market = str(member.get("market") or "")
                 if member_market != "Crypto" and not (
