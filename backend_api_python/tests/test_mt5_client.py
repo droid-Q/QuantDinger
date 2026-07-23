@@ -50,7 +50,7 @@ def _fake_mt5():
     mod.TIMEFRAME_D1 = 1440
     mod.TIMEFRAME_W1 = 10080
     mod.sent = []
-    mod.initialize = lambda **kwargs: True
+    mod.initialize = lambda *args, **kwargs: True
     mod.shutdown = lambda: None
     mod.last_error = lambda: (0, "")
     mod.terminal_info = lambda: Terminal(
@@ -128,6 +128,24 @@ def test_mt5_client_kline_accepts_numpy_like_rows(monkeypatch):
     client = MT5Client(MT5Config(login=1, password="pw", server="CPT-Demo"))
     assert client.connect() is True
     assert len(client.get_kline("XAUUSD", "1h", 2)) == 2
+
+
+def test_mt5_connect_replaces_ipc_session_and_uses_saved_terminal_path(monkeypatch):
+    fake = _fake_mt5()
+    calls = []
+    fake.shutdown = lambda: calls.append(("shutdown", (), {}))
+    fake.initialize = lambda *args, **kwargs: calls.append(("initialize", args, kwargs)) or True
+    monkeypatch.setitem(sys.modules, "MetaTrader5", fake)
+    monkeypatch.setattr(mt5_client_module, "_mt5", None)
+
+    path = r"C:\Program Files\CPT Markets MT5 Terminal\terminal64.exe"
+    client = MT5Client(MT5Config(login=1, password="pw", server="CPT-Demo", path=path))
+
+    assert client.connect() is True
+    assert calls[0][0] == "shutdown"
+    assert calls[1][0] == "initialize"
+    assert calls[1][1] == (path,)
+    assert calls[1][2]["login"] == 1
 
 
 def test_mt5_ticker_prefers_bid_ask_when_last_trade_is_stale(monkeypatch):

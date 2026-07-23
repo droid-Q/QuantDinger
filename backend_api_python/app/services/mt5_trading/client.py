@@ -116,8 +116,6 @@ class MT5Client:
             "timeout": int(self.config.timeout or 60000),
             "portable": bool(self.config.portable),
         }
-        if self.config.path:
-            kwargs["path"] = self.config.path
         if self.config.login:
             kwargs["login"] = int(self.config.login)
         if self.config.password:
@@ -125,7 +123,11 @@ class MT5Client:
         if self.config.server:
             kwargs["server"] = self.config.server
 
-        ok = bool(mt5.initialize(**kwargs))
+        try:
+            mt5.shutdown()
+        except Exception:
+            pass
+        ok = bool(mt5.initialize(self.config.path, **kwargs) if self.config.path else mt5.initialize(**kwargs))
         if not ok:
             code, msg = self._last_error()
             logger.error("MT5 initialize failed: %s %s", code, msg)
