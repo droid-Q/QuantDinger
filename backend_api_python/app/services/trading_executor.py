@@ -3,12 +3,15 @@
 from __future__ import annotations
 
 import json
+import logging
 import math
 import os
 import re
 import threading
 import time
 from datetime import datetime, timedelta, timezone
+from functools import lru_cache
+from logging.handlers import RotatingFileHandler
 from typing import Any, Dict, List, Optional, Tuple
 
 import pandas as pd
@@ -34,8 +37,93 @@ from app.utils.strategy_runtime_logs import append_strategy_log
 
 logger = get_logger(__name__)
 
+
+@lru_cache(maxsize=1)
+def _get_strategy_diagnostic_logger() -> logging.Logger:
+    target = logging.getLogger(f"{__name__}.diagnostics")
+    target.setLevel(logging.INFO)
+    target.propagate = False
+    if target.handlers:
+        return target
+    diagnostic_log_dir = os.getenv("LOG_DIR", "logs")
+    os.makedirs(diagnostic_log_dir, exist_ok=True)
+    diagnostic_handler = RotatingFileHandler(
+        os.path.join(diagnostic_log_dir, "strategy-runtime-diagnostics.log"),
+        maxBytes=int(os.getenv("LOG_MAX_BYTES", str(10 * 1024 * 1024))),
+        backupCount=int(os.getenv("LOG_BACKUP_COUNT", "5")),
+        encoding="utf-8",
+        delay=True,
+    )
+    diagnostic_handler.setFormatter(logging.Formatter("%(asctime)s - %(message)s"))
+    target.addHandler(diagnostic_handler)
+    return target
+
 MIN_LIVE_ORDER_NOTIONAL = 1.0
 MT5_EXCHANGES = {"mt5", "cptmarkets", "cpt_markets"}
+
+
+def _strategy_diagnostic_log(strategy_id: int, event: str, **fields: Any) -> None:
+    try:
+        _get_strategy_diagnostic_logger().info(json.dumps(
+            {"strategy_id": int(strategy_id), "event": str(event), **fields},
+            ensure_ascii=False,
+            separators=(",", ":"),
+            default=str,
+        ))
+    except Exception:
+        logger.exception("Strategy %s diagnostic log write failed", strategy_id)
+
+
+def _log_frame_diagnostics(
+    strategy_id: int,
+    frames: Dict[str, pd.DataFrame],
+    candidates: List[Dict[str, Any]],
+    frequency: str,
+) -> None:
+    for member in candidates:
+        key = str(member.get("key") or _member_key(member))
+        frame = frames.get(key)
+        exchange_id = str(member.get("exchange_id") or "").strip().lower()
+        source = f"{exchange_id}/mt5_terminal" if exchange_id in MT5_EXCHANGES else (
+            exchange_id or str(member.get("market") or "default")
+        )
+        if frame is None or frame.empty:
+            _strategy_diagnostic_log(
+                strategy_id,
+                "market_data",
+                instrument=key,
+                source=source,
+                timeframe=frequency,
+                status="empty",
+                bars=0,
+            )
+            continue
+
+        first_bar = pd.Timestamp(frame.index[0])
+        last_bar = pd.Timestamp(frame.index[-1])
+        first_bar_utc = first_bar.tz_localize("UTC") if first_bar.tzinfo is None else first_bar.tz_convert("UTC")
+        last_bar_utc = last_bar.tz_localize("UTC") if last_bar.tzinfo is None else last_bar.tz_convert("UTC")
+        latest = frame.iloc[-1]
+        ohlcv = {
+            name: None if name not in latest or pd.isna(latest[name]) else float(latest[name])
+            for name in ("open", "high", "low", "close", "volume")
+        }
+        _strategy_diagnostic_log(
+            strategy_id,
+            "market_data",
+            instrument=key,
+            source=source,
+            timeframe=frequency,
+            status="ok",
+            bars=len(frame),
+            first_bar_utc=first_bar_utc.isoformat(),
+            last_bar_utc=last_bar_utc.isoformat(),
+            age_seconds=max(0.0, round((pd.Timestamp.now(tz="UTC") - last_bar_utc).total_seconds(), 3)),
+            ohlcv=ohlcv,
+            index_monotonic=bool(frame.index.is_monotonic_increasing),
+            duplicate_timestamps=int(frame.index.duplicated().sum()),
+            missing_close=int(frame["close"].isna().sum()) if "close" in frame.columns else len(frame),
+        )
 
 
 def live_history_days(frequency: str, warmup_bars: int) -> int:
@@ -604,6 +692,13 @@ class TradingExecutor:
                         bar_advanced = (
                             previous_timestamp is None or timestamp > previous_timestamp
                         )
+                        if bar_advanced:
+                            _log_frame_diagnostics(
+                                strategy_id,
+                                frames,
+                                candidates,
+                                frequency,
+                            )
                         intents = [intent for intent in intents if str(intent.symbol) not in protected]
                         pending_count += len(intents)
                         for message in messages:
@@ -637,6 +732,13 @@ class TradingExecutor:
                                 timestamp,
                                 intent_count=len(intents),
                                 submitted_count=submitted_count,
+                            )
+                            _strategy_diagnostic_log(
+                                strategy_id,
+                                "bar_evaluation",
+                                closed_bar=timestamp.isoformat(),
+                                intents=len(intents),
+                                executable_signals=submitted_count,
                             )
                         next_signal_poll = cycle_started + signal_poll
                     state_store.save(session.protection_snapshot())
@@ -760,10 +862,42 @@ class TradingExecutor:
             raise RuntimeError("strategyV2.spotShortUnsupported")
 
         closes_position = abs(target_amount) <= 1e-12 and abs(current_amount) > 1e-12
-        if abs(target_amount - current_amount) * price < MIN_LIVE_ORDER_NOTIONAL and not closes_position:
+        delta_amount = target_amount - current_amount
+        delta_notional = abs(delta_amount) * price
+        diagnostics = {
+            "instrument": str(intent.symbol),
+            "symbol": symbol,
+            "intent_kind": str(intent.kind),
+            "intent_value": float(intent.value),
+            "intent_reason": str(intent.reason or "strategy"),
+            "position_side": intent_position_side,
+            "current_amount": current_amount,
+            "target_amount": target_amount,
+            "delta_amount": delta_amount,
+            "delta_notional": delta_notional,
+            "execution_price": price,
+        }
+        if delta_notional < MIN_LIVE_ORDER_NOTIONAL and not closes_position:
+            _strategy_diagnostic_log(
+                strategy_id,
+                "intent_evaluation",
+                **diagnostics,
+                decision="skipped",
+                skip_reason="below_min_order_notional",
+                minimum_notional=MIN_LIVE_ORDER_NOTIONAL,
+            )
             return False
 
         requests = self._order_plan(current_amount, target_amount)
+        if not requests:
+            _strategy_diagnostic_log(
+                strategy_id,
+                "intent_evaluation",
+                **diagnostics,
+                decision="skipped",
+                skip_reason="no_order_required",
+            )
+            return False
         submitted = False
         for action, quantity in requests:
             submitted = bool(self._execute_signal(
@@ -793,6 +927,14 @@ class TradingExecutor:
                 strategy_run_id=strategy_run_id,
                 price_exchange_id=str(member.get("exchange_id") or ""),
             )) or submitted
+        _strategy_diagnostic_log(
+            strategy_id,
+            "intent_evaluation",
+            **diagnostics,
+            actions=[{"action": action, "quantity": quantity} for action, quantity in requests],
+            decision="submitted" if submitted else "skipped",
+            skip_reason="" if submitted else "order_gateway_not_queued",
+        )
         return submitted
 
     def _execute_signal(self, **values: Any) -> bool:

@@ -2,7 +2,7 @@ import pandas as pd
 
 from app.services.strategy_v2 import OrderIntent
 from app.services.strategy_v2.live_execution import LiveOrderRequest, StrategyV2OrderGateway
-from app.services.trading_executor import TradingExecutor, live_history_days
+from app.services.trading_executor import TradingExecutor, _log_frame_diagnostics, live_history_days
 
 
 def test_live_history_lookback_is_frequency_aware():
@@ -44,6 +44,22 @@ def test_bar_evaluation_distinguishes_noop_from_executable_signal(monkeypatch):
             "Closed bar 2026-07-23T06:35:00+00:00 evaluated: intents=1, executable_signals=1",
         ),
     ]
+
+
+def test_mt5_frame_diagnostics_include_source_and_latest_ohlcv(monkeypatch):
+    captured = []
+    monkeypatch.setattr(
+        "app.services.trading_executor._strategy_diagnostic_log",
+        lambda strategy_id, event, **fields: captured.append((strategy_id, event, fields)),
+    )
+    member = _forex_member()
+
+    _log_frame_diagnostics(345, {member["key"]: _frame(price=4089.5)}, [member], "1m")
+
+    assert captured[0][0:2] == (345, "market_data")
+    assert captured[0][2]["source"] == "cptmarkets/mt5_terminal"
+    assert captured[0][2]["bars"] == 1
+    assert captured[0][2]["ohlcv"]["close"] == 4089.5
 
 
 def test_intent_signal_timestamp_prefers_scheduled_wall_clock():
@@ -281,10 +297,15 @@ def test_hedged_target_updates_only_the_requested_leg():
     assert calls[0]["script_base_qty"] == 2.0
 
 
-def test_target_rebalance_skips_sub_dollar_dust_order():
+def test_target_rebalance_skips_sub_dollar_dust_order(monkeypatch):
     executor = TradingExecutor.__new__(TradingExecutor)
     executor._get_current_positions = lambda *_args: [{"side": "long", "size": 10.0}]
     calls = []
+    diagnostics = []
+    monkeypatch.setattr(
+        "app.services.trading_executor._strategy_diagnostic_log",
+        lambda strategy_id, event, **fields: diagnostics.append((strategy_id, event, fields)),
+    )
     executor._execute_signal = lambda **kwargs: calls.append(kwargs) or True
     intent = OrderIntent(symbol="USStock:AAPL", kind="target_quantity", value=10.004)
     member = {
@@ -313,6 +334,8 @@ def test_target_rebalance_skips_sub_dollar_dust_order():
 
     assert result is False
     assert calls == []
+    assert diagnostics[0][1] == "intent_evaluation"
+    assert diagnostics[0][2]["skip_reason"] == "below_min_order_notional"
 
 
 def test_live_order_carries_run_sizing_diagnostics():
