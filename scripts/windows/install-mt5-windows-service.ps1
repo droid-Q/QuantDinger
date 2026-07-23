@@ -11,6 +11,7 @@ param(
     [string]$PythonVersion = "3.12",
     [switch]$DockerOnly,
     [switch]$SkipPipInstall,
+    [switch]$Passwordless,
     [switch]$RunAsLocalSystem
 )
 
@@ -229,6 +230,44 @@ function Install-BackendService {
     Invoke-Nssm $nssm "start" $ServiceName
 }
 
+function Install-BackendLogonTask {
+    $taskUser = [Security.Principal.WindowsIdentity]::GetCurrent().Name
+    New-Item -ItemType Directory -Force -Path $LogsDir | Out-Null
+
+    $existingService = Get-Service -Name $ServiceName -ErrorAction SilentlyContinue
+    if ($existingService) {
+        Stop-Service -Name $ServiceName -Force -ErrorAction SilentlyContinue
+        & sc.exe delete $ServiceName *> $null
+        if ($LASTEXITCODE -ne 0) { Fail "Could not remove existing service $ServiceName." }
+    }
+    if (Get-ScheduledTask -TaskName $ServiceName -ErrorAction SilentlyContinue) {
+        Stop-ScheduledTask -TaskName $ServiceName -ErrorAction SilentlyContinue
+        Unregister-ScheduledTask -TaskName $ServiceName -Confirm:$false
+    }
+
+    $runPy = Join-Path $BackendDir "run.py"
+    $sessionLog = Join-Path $LogsDir "windows-session.log"
+    $command = "`$env:PYTHONUTF8='1'; `$env:PYTHONUNBUFFERED='1'; & '$VenvPython' '$runPy' *>> '$sessionLog'"
+    $arguments = "-NoProfile -ExecutionPolicy Bypass -Command `"$command`""
+    $action = New-ScheduledTaskAction -Execute "powershell.exe" -Argument $arguments -WorkingDirectory $BackendDir
+    $trigger = New-ScheduledTaskTrigger -AtLogOn -User $taskUser
+    $trigger.Delay = "PT30S"
+    $principal = New-ScheduledTaskPrincipal -UserId $taskUser -LogonType Interactive -RunLevel Highest
+    $settings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -StartWhenAvailable -ExecutionTimeLimit ([TimeSpan]::Zero) -RestartCount 10 -RestartInterval (New-TimeSpan -Minutes 1)
+    Register-ScheduledTask -TaskName $ServiceName -Action $action -Trigger $trigger -Principal $principal -Settings $settings -Description "Run QuantDinger MT5 backend in the logged-on user's interactive session." -Force | Out-Null
+    Start-ScheduledTask -TaskName $ServiceName
+
+    for ($i = 1; $i -le 30; $i++) {
+        Start-Sleep -Seconds 1
+        try {
+            $response = Invoke-WebRequest -UseBasicParsing -Uri "http://127.0.0.1:$BackendPort/api/health" -TimeoutSec 2
+            if ($response.StatusCode -lt 500) { return }
+        } catch {}
+    }
+    $result = (Get-ScheduledTaskInfo -TaskName $ServiceName).LastTaskResult
+    Fail "Scheduled task $ServiceName did not become ready (result: $result). See $sessionLog."
+}
+
 function Register-DockerStartupTask {
     $script = $PSCommandPath
     $arguments = "-NoProfile -ExecutionPolicy Bypass -File `"$script`" -DockerOnly -ProjectRoot `"$ProjectRoot`" -BackendPort $BackendPort -DbPort $DbPort -RedisPort $RedisPort -FrontendPort $FrontendPort -MobilePort $MobilePort"
@@ -247,20 +286,38 @@ if ($DockerOnly) {
 }
 
 Require-Admin
+if ($Passwordless -and $RunAsLocalSystem) {
+    Fail "-Passwordless and -RunAsLocalSystem cannot be used together."
+}
 Prepare-Env
 Prepare-Python
 Start-DockerServices
-Install-BackendService
+if ($Passwordless) {
+    Install-BackendLogonTask
+} else {
+    Install-BackendService
+}
 Register-DockerStartupTask
 
 Write-Host ""
-Write-Host "QuantDinger MT5 backend service installed." -ForegroundColor Green
-Write-Host "Service: $ServiceName"
+if ($Passwordless) {
+    Write-Host "QuantDinger MT5 backend passwordless logon task installed." -ForegroundColor Green
+    Write-Host "Task: $ServiceName"
+} else {
+    Write-Host "QuantDinger MT5 backend service installed." -ForegroundColor Green
+    Write-Host "Service: $ServiceName"
+}
 Write-Host "Backend: http://127.0.0.1:$BackendPort"
 Write-Host "Frontend: http://localhost:$FrontendPort"
 Write-Host "Logs: $LogsDir"
 Write-Host ""
 Write-Host "Useful commands:"
-Write-Host "  Get-Service $ServiceName"
-Write-Host "  Restart-Service $ServiceName"
+if ($Passwordless) {
+    Write-Host "  Get-ScheduledTask $ServiceName"
+    Write-Host "  Start-ScheduledTask $ServiceName"
+    Write-Host "  Stop-ScheduledTask $ServiceName"
+} else {
+    Write-Host "  Get-Service $ServiceName"
+    Write-Host "  Restart-Service $ServiceName"
+}
 Write-Host "  docker compose -f `"$ComposeFile`" ps"
