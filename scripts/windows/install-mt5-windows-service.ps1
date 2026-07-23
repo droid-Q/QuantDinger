@@ -270,7 +270,7 @@ function Install-BackendLogonTask {
     $runPy = Join-Path $BackendDir "run.py"
     $sessionLog = Join-Path $LogsDir "windows-session.log"
     $command = "`$env:PYTHONUTF8='1'; `$env:PYTHONUNBUFFERED='1'; & '$VenvPython' '$runPy' *>> '$sessionLog'"
-    $arguments = "-NoProfile -ExecutionPolicy Bypass -Command `"$command`""
+    $arguments = "-NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -Command `"$command`""
     $action = New-ScheduledTaskAction -Execute "powershell.exe" -Argument $arguments -WorkingDirectory $BackendDir
     $trigger = New-ScheduledTaskTrigger -AtLogOn -User $taskUser
     $trigger.Delay = "PT30S"
