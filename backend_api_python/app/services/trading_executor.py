@@ -586,13 +586,18 @@ class TradingExecutor:
                         frames = fetch_frames()
                         if execution_mode == "live":
                             frames = self._align_latest_frame_prices(frames, runtime_prices())
+                        previous_timestamp = session.last_processed
                         intents, messages, timestamp = session.process(frames)
+                        bar_advanced = (
+                            previous_timestamp is None or timestamp > previous_timestamp
+                        )
                         intents = [intent for intent in intents if str(intent.symbol) not in protected]
                         pending_count += len(intents)
                         for message in messages:
                             append_strategy_log(strategy_id, "info", message)
+                        submitted_count = 0
                         for intent in intents:
-                            self._execute_strategy_v2_intent(
+                            submitted = self._execute_strategy_v2_intent(
                                 strategy_id=strategy_id,
                                 strategy_name=strategy_name,
                                 intent=intent,
@@ -606,6 +611,14 @@ class TradingExecutor:
                                 exchange_config=exchange_config,
                                 signal_ts=self._intent_signal_timestamp(intent, timestamp),
                                 strategy_run_id=run_id,
+                            )
+                            submitted_count += int(submitted)
+                        if bar_advanced:
+                            self._record_bar_evaluation(
+                                strategy_id,
+                                timestamp,
+                                intent_count=len(intents),
+                                submitted_count=submitted_count,
                             )
                         next_signal_poll = cycle_started + signal_poll
                     state_store.save(session.protection_snapshot())
@@ -649,6 +662,23 @@ class TradingExecutor:
             with self.lock:
                 if self.running_strategies.get(strategy_id) is current:
                     self.running_strategies.pop(strategy_id, None)
+
+    @staticmethod
+    def _record_bar_evaluation(
+        strategy_id: int,
+        timestamp: pd.Timestamp,
+        *,
+        intent_count: int,
+        submitted_count: int,
+    ) -> None:
+        level = "signal" if submitted_count > 0 else "info"
+        append_strategy_log(
+            strategy_id,
+            level,
+            f"Closed bar {timestamp.isoformat()} evaluated: "
+            f"intents={max(0, int(intent_count))}, "
+            f"executable_signals={max(0, int(submitted_count))}",
+        )
 
     def _execute_strategy_v2_intent(
         self,

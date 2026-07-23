@@ -11,6 +11,41 @@ def test_live_history_lookback_is_frequency_aware():
     assert live_history_days("1d", 50) == 150
 
 
+def test_bar_evaluation_distinguishes_noop_from_executable_signal(monkeypatch):
+    captured = []
+    monkeypatch.setattr(
+        "app.services.trading_executor.append_strategy_log",
+        lambda strategy_id, level, message: captured.append((strategy_id, level, message)),
+    )
+    timestamp = pd.Timestamp("2026-07-23T06:35:00Z")
+
+    TradingExecutor._record_bar_evaluation(
+        345,
+        timestamp,
+        intent_count=1,
+        submitted_count=0,
+    )
+    TradingExecutor._record_bar_evaluation(
+        345,
+        timestamp,
+        intent_count=1,
+        submitted_count=1,
+    )
+
+    assert captured == [
+        (
+            345,
+            "info",
+            "Closed bar 2026-07-23T06:35:00+00:00 evaluated: intents=1, executable_signals=0",
+        ),
+        (
+            345,
+            "signal",
+            "Closed bar 2026-07-23T06:35:00+00:00 evaluated: intents=1, executable_signals=1",
+        ),
+    ]
+
+
 def test_intent_signal_timestamp_prefers_scheduled_wall_clock():
     intent = OrderIntent(
         symbol="Crypto:BTC/USDT@okx:swap",
