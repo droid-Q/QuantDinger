@@ -178,6 +178,9 @@ function Prepare-Python {
 }
 
 function Install-BackendService {
+    if ($RunAsLocalSystem) {
+        Fail "MT5 settings belong to the logged-on Windows user. -RunAsLocalSystem cannot trade through that user's CPT Markets terminal."
+    }
     if (Get-ScheduledTask -TaskName $ServiceName -ErrorAction SilentlyContinue) {
         Stop-ScheduledTask -TaskName $ServiceName -ErrorAction SilentlyContinue
         Unregister-ScheduledTask -TaskName $ServiceName -Confirm:$false
@@ -214,7 +217,10 @@ function Install-BackendService {
         $ptr = [Runtime.InteropServices.Marshal]::SecureStringToBSTR($secure)
         try {
             $plain = [Runtime.InteropServices.Marshal]::PtrToStringBSTR($ptr)
-            if ($plain) { Invoke-Nssm $nssm "set" $ServiceName "ObjectName" $serviceUser $plain }
+            if (-not $plain) {
+                Fail "A non-empty Windows account password is required for an NSSM service to use this user's MT5 profile."
+            }
+            Invoke-Nssm $nssm "set" $ServiceName "ObjectName" $serviceUser $plain
         } finally {
             [Runtime.InteropServices.Marshal]::ZeroFreeBSTR($ptr)
         }
