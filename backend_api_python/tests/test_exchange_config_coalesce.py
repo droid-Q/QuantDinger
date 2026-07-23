@@ -1,4 +1,7 @@
 """exchange_config coalescing for strategy create/update payloads."""
+from unittest.mock import patch
+
+from app.services import exchange_execution
 from app.services.broker_market_policy import validate_strategy_config
 from app.services.exchange_execution import coalesce_exchange_config_from_payload
 
@@ -60,3 +63,44 @@ def test_live_strategy_validates_after_trading_config_coalesce():
         trade_direction="both",
         require_exchange=True,
     )
+
+
+def test_load_strategy_configs_recovers_legacy_mt5_routing():
+    row = {
+        "id": 6,
+        "user_id": 1,
+        "symbol": "XAUUSD",
+        "exchange_config": {},
+        "trading_config": {"credential_id": 9, "exchange_id": "cptmarkets"},
+        "market_type": "spot",
+        "leverage": 1,
+        "execution_mode": "live",
+        "market_category": "",
+    }
+
+    class Cursor:
+        def execute(self, *_args):
+            pass
+
+        def fetchone(self):
+            return row
+
+        def close(self):
+            pass
+
+    class Database:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            pass
+
+        def cursor(self):
+            return Cursor()
+
+    with patch.object(exchange_execution, "get_db_connection", return_value=Database()):
+        config = exchange_execution.load_strategy_configs(6)
+
+    assert config["market_category"] == "Forex"
+    assert config["exchange_config"]["exchange_id"] == "cptmarkets"
+    assert config["exchange_config"]["credential_id"] == "9"

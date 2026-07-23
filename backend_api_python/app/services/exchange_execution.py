@@ -112,6 +112,10 @@ def load_strategy_configs(strategy_id: int) -> Dict[str, Any]:
 
     exchange_config = _safe_json_loads(row.get("exchange_config"), {})
     trading_config = _safe_json_loads(row.get("trading_config"), {})
+    exchange_config = coalesce_exchange_config_from_payload({
+        "exchange_config": exchange_config,
+        "trading_config": trading_config,
+    })
 
     market_type = (row.get("market_type") or exchange_config.get("market_type") or "swap").strip()
     leverage = float(row.get("leverage") or trading_config.get("leverage") or exchange_config.get("leverage") or 1.0)
