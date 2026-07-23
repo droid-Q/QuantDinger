@@ -13,6 +13,7 @@ param(
     [switch]$SessionRun,
     [switch]$SkipPipInstall,
     [switch]$Passwordless,
+    [switch]$WindowsService,
     [switch]$RunAsLocalSystem
 )
 
@@ -301,13 +302,17 @@ if ($SessionRun) {
 }
 
 Require-Admin
-if ($Passwordless -and $RunAsLocalSystem) {
-    Fail "-Passwordless and -RunAsLocalSystem cannot be used together."
+if ($Passwordless -and $WindowsService) {
+    Fail "-Passwordless and -WindowsService cannot be used together."
+}
+$usePasswordless = -not $WindowsService
+if ($usePasswordless -and $RunAsLocalSystem) {
+    Fail "Passwordless logon-task mode and -RunAsLocalSystem cannot be used together."
 }
 Prepare-Env
 Prepare-Python
 Start-DockerServices
-if ($Passwordless) {
+if ($usePasswordless) {
     Install-BackendLogonTask
 } else {
     Install-BackendService
@@ -315,7 +320,7 @@ if ($Passwordless) {
 }
 
 Write-Host ""
-if ($Passwordless) {
+if ($usePasswordless) {
     Write-Host "QuantDinger MT5 backend passwordless logon task installed." -ForegroundColor Green
     Write-Host "Task: $ServiceName"
 } else {
@@ -327,7 +332,7 @@ Write-Host "Frontend: http://localhost:$FrontendPort"
 Write-Host "Logs: $LogsDir"
 Write-Host ""
 Write-Host "Useful commands:"
-if ($Passwordless) {
+if ($usePasswordless) {
     Write-Host "  Get-ScheduledTask $ServiceName"
     Write-Host "  Start-ScheduledTask $ServiceName"
     Write-Host "  Stop-ScheduledTask $ServiceName"
