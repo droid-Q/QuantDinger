@@ -12,6 +12,7 @@ param(
     [switch]$DockerOnly,
     [switch]$SkipPipInstall,
     [switch]$Passwordless,
+    [switch]$WindowsService,
     [switch]$RunAsLocalSystem
 )
 
@@ -234,15 +235,36 @@ function Install-BackendLogonTask {
     $taskUser = [Security.Principal.WindowsIdentity]::GetCurrent().Name
     New-Item -ItemType Directory -Force -Path $LogsDir | Out-Null
 
-    $existingService = Get-Service -Name $ServiceName -ErrorAction SilentlyContinue
-    if ($existingService) {
-        Stop-Service -Name $ServiceName -Force -ErrorAction SilentlyContinue
-        & sc.exe delete $ServiceName *> $null
-        if ($LASTEXITCODE -ne 0) { Fail "Could not remove existing service $ServiceName." }
-    }
     if (Get-ScheduledTask -TaskName $ServiceName -ErrorAction SilentlyContinue) {
         Stop-ScheduledTask -TaskName $ServiceName -ErrorAction SilentlyContinue
         Unregister-ScheduledTask -TaskName $ServiceName -Confirm:$false
+    }
+    $existingService = Get-Service -Name $ServiceName -ErrorAction SilentlyContinue
+    if ($existingService) {
+        if ($existingService.Status -ne "Stopped") {
+            Stop-Service -Name $ServiceName -Force
+            $existingService.WaitForStatus("Stopped", [TimeSpan]::FromSeconds(30))
+        }
+        & sc.exe delete $ServiceName *> $null
+        if ($LASTEXITCODE -ne 0) { Fail "Could not remove existing service $ServiceName." }
+        for ($i = 1; $i -le 30; $i++) {
+            if (-not (Get-Service -Name $ServiceName -ErrorAction SilentlyContinue)) { break }
+            Start-Sleep -Seconds 1
+        }
+        if (Get-Service -Name $ServiceName -ErrorAction SilentlyContinue) {
+            Fail "Service $ServiceName is still pending deletion. Reboot Windows, then run this installer again."
+        }
+    }
+
+    $listener = Get-NetTCPConnection -LocalPort $BackendPort -State Listen -ErrorAction SilentlyContinue | Select-Object -First 1
+    if ($listener) {
+        $process = Get-CimInstance Win32_Process -Filter "ProcessId = $($listener.OwningProcess)"
+        $sameBackend = $process.ExecutablePath -ieq $VenvPython -and $process.CommandLine -match "run\.py"
+        if (-not $sameBackend) {
+            Fail "Port $BackendPort is already owned by PID $($listener.OwningProcess): $($process.CommandLine)"
+        }
+        Stop-Process -Id $listener.OwningProcess -Force
+        Start-Sleep -Seconds 2
     }
 
     $runPy = Join-Path $BackendDir "run.py"
@@ -257,15 +279,22 @@ function Install-BackendLogonTask {
     Register-ScheduledTask -TaskName $ServiceName -Action $action -Trigger $trigger -Principal $principal -Settings $settings -Description "Run QuantDinger MT5 backend in the logged-on user's interactive session." -Force | Out-Null
     Start-ScheduledTask -TaskName $ServiceName
 
+    $lastOwner = ""
     for ($i = 1; $i -le 30; $i++) {
         Start-Sleep -Seconds 1
         try {
             $response = Invoke-WebRequest -UseBasicParsing -Uri "http://127.0.0.1:$BackendPort/api/health" -TimeoutSec 2
-            if ($response.StatusCode -lt 500) { return }
+            if ($response.StatusCode -lt 500) {
+                $listener = Get-NetTCPConnection -LocalPort $BackendPort -State Listen -ErrorAction Stop | Select-Object -First 1
+                $process = Get-CimInstance Win32_Process -Filter "ProcessId = $($listener.OwningProcess)"
+                $owner = Invoke-CimMethod -InputObject $process -MethodName GetOwner
+                $lastOwner = "$($owner.Domain)\$($owner.User)"
+                if ($lastOwner -ieq $taskUser) { return }
+            }
         } catch {}
     }
     $result = (Get-ScheduledTaskInfo -TaskName $ServiceName).LastTaskResult
-    Fail "Scheduled task $ServiceName did not become ready (result: $result). See $sessionLog."
+    Fail "Scheduled task $ServiceName did not become ready as $taskUser (result: $result, listener_owner=$lastOwner). See $sessionLog."
 }
 
 function Register-DockerStartupTask {
@@ -286,13 +315,17 @@ if ($DockerOnly) {
 }
 
 Require-Admin
-if ($Passwordless -and $RunAsLocalSystem) {
-    Fail "-Passwordless and -RunAsLocalSystem cannot be used together."
+if ($Passwordless -and $WindowsService) {
+    Fail "-Passwordless and -WindowsService cannot be used together."
+}
+$usePasswordless = -not $WindowsService
+if ($usePasswordless -and $RunAsLocalSystem) {
+    Fail "Passwordless logon-task mode and -RunAsLocalSystem cannot be used together."
 }
 Prepare-Env
 Prepare-Python
 Start-DockerServices
-if ($Passwordless) {
+if ($usePasswordless) {
     Install-BackendLogonTask
 } else {
     Install-BackendService
@@ -300,7 +333,7 @@ if ($Passwordless) {
 Register-DockerStartupTask
 
 Write-Host ""
-if ($Passwordless) {
+if ($usePasswordless) {
     Write-Host "QuantDinger MT5 backend passwordless logon task installed." -ForegroundColor Green
     Write-Host "Task: $ServiceName"
 } else {
@@ -312,7 +345,7 @@ Write-Host "Frontend: http://localhost:$FrontendPort"
 Write-Host "Logs: $LogsDir"
 Write-Host ""
 Write-Host "Useful commands:"
-if ($Passwordless) {
+if ($usePasswordless) {
     Write-Host "  Get-ScheduledTask $ServiceName"
     Write-Host "  Start-ScheduledTask $ServiceName"
     Write-Host "  Stop-ScheduledTask $ServiceName"
