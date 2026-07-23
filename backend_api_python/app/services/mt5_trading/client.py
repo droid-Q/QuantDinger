@@ -207,18 +207,41 @@ class MT5Client:
         return qty
 
     def get_connection_status(self) -> Dict[str, Any]:
-        account = self.get_account_summary() if self.connected else {}
+        connected = bool(self.connected)
+        account = self.get_account_summary() if connected else {}
+        terminal = account.get("terminal") or {}
         return {
-            "connected": bool(self.connected),
+            "connected": connected,
+            "tradingReady": bool(terminal.get("tradingReady")),
             "broker": self.config.broker,
             "server": self.config.server,
             "login": self.config.login or None,
+            "terminal": terminal,
             "account": account,
+        }
+
+    def get_terminal_summary(self) -> Dict[str, Any]:
+        self._ensure_connected()
+        info = _as_dict(_ensure_mt5().terminal_info())
+        connected = bool(info.get("connected"))
+        trade_allowed = bool(info.get("trade_allowed"))
+        tradeapi_disabled = bool(info.get("tradeapi_disabled"))
+        return {
+            "connected": connected,
+            "tradingReady": connected and trade_allowed and not tradeapi_disabled,
+            "tradeAllowed": trade_allowed,
+            "tradeApiDisabled": tradeapi_disabled,
+            "path": str(info.get("path") or self.config.path or ""),
+            "dataPath": str(info.get("data_path") or ""),
+            "commonDataPath": str(info.get("commondata_path") or ""),
+            "name": str(info.get("name") or ""),
+            "build": int(info.get("build") or 0),
         }
 
     def get_account_summary(self) -> Dict[str, Any]:
         self._ensure_connected()
         info = _as_dict(_ensure_mt5().account_info())
+        terminal = self.get_terminal_summary()
         return {
             "login": info.get("login"),
             "server": info.get("server") or self.config.server,
@@ -230,6 +253,10 @@ class MT5Client:
             "margin": _num(info.get("margin")),
             "freeMargin": _num(info.get("margin_free")),
             "marginFree": _num(info.get("margin_free")),
+            "tradingReady": bool(terminal.get("tradingReady")),
+            "terminalTradeAllowed": bool(terminal.get("tradeAllowed")),
+            "terminalTradeApiDisabled": bool(terminal.get("tradeApiDisabled")),
+            "terminal": terminal,
             "raw": info,
         }
 
@@ -348,11 +375,30 @@ class MT5Client:
 
     def _send_order(self, request: Dict[str, Any]) -> OrderResult:
         mt5 = _ensure_mt5()
+        terminal = self.get_terminal_summary()
+        if not terminal.get("tradingReady"):
+            flags = (
+                f"trade_allowed={str(bool(terminal.get('tradeAllowed'))).lower()}, "
+                f"tradeapi_disabled={str(bool(terminal.get('tradeApiDisabled'))).lower()}"
+            )
+            return OrderResult(
+                success=False,
+                status="rejected",
+                message=(
+                    "MT5 terminal used by the backend cannot trade "
+                    f"({flags}, path={terminal.get('path') or '-'}, "
+                    f"data_path={terminal.get('dataPath') or '-'}). "
+                    "Run QuantDingerBackend under the Windows account that configured this terminal, "
+                    "enable AutoTrading, and keep external Python API trading enabled."
+                ),
+                raw={"retcode": 10027, "terminal": terminal},
+            )
         check = mt5.order_check(request)
         check_raw = _as_dict(check)
         result = mt5.order_send(request)
         raw = _as_dict(result)
         raw["order_check"] = check_raw
+        raw["terminal"] = terminal
         retcode = int(raw.get("retcode") or 0)
         fill_codes = {
             getattr(mt5, "TRADE_RETCODE_DONE", 10009),
@@ -363,13 +409,21 @@ class MT5Client:
         filled = _num(raw.get("volume") or request.get("volume")) if retcode in fill_codes else 0.0
         avg_price = _num(raw.get("price") or request.get("price")) if filled > 0 else 0.0
         order_id = str(raw.get("order") or raw.get("deal") or "")
+        message = str(raw.get("comment") or check_raw.get("comment") or ("success" if success else f"MT5 retcode {retcode}"))
+        if retcode == getattr(mt5, "TRADE_RETCODE_CLIENT_DISABLES_AT", 10027):
+            message += (
+                "; terminal_info: "
+                f"trade_allowed={str(bool(terminal.get('tradeAllowed'))).lower()}, "
+                f"tradeapi_disabled={str(bool(terminal.get('tradeApiDisabled'))).lower()}, "
+                f"path={terminal.get('path') or '-'}, data_path={terminal.get('dataPath') or '-'}"
+            )
         return OrderResult(
             success=success,
             order_id=order_id,
             filled=filled,
             avg_price=avg_price,
             status="filled" if retcode in fill_codes else ("placed" if success else "rejected"),
-            message=str(raw.get("comment") or check_raw.get("comment") or ("success" if success else f"MT5 retcode {retcode}")),
+            message=message,
             raw=raw,
         )
 

@@ -178,6 +178,9 @@ function Prepare-Python {
 }
 
 function Install-BackendService {
+    if ($RunAsLocalSystem) {
+        Fail "MT5 Terminal settings are tied to a Windows user. Run the backend under the same Windows account that configured CPT Markets MT5; -RunAsLocalSystem is not supported."
+    }
     $nssm = Resolve-Nssm
     New-Item -ItemType Directory -Force -Path $LogsDir | Out-Null
 
@@ -210,7 +213,10 @@ function Install-BackendService {
         $ptr = [Runtime.InteropServices.Marshal]::SecureStringToBSTR($secure)
         try {
             $plain = [Runtime.InteropServices.Marshal]::PtrToStringBSTR($ptr)
-            if ($plain) { Invoke-Nssm $nssm "set" $ServiceName "ObjectName" $serviceUser $plain }
+            if (-not $plain) {
+                Fail "A non-empty Windows account password is required. NSSM otherwise keeps the service on LocalSystem, which uses different MT5 settings."
+            }
+            Invoke-Nssm $nssm "set" $ServiceName "ObjectName" $serviceUser $plain
         } finally {
             [Runtime.InteropServices.Marshal]::ZeroFreeBSTR($ptr)
         }

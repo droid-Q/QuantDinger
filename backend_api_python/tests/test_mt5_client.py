@@ -18,6 +18,10 @@ def _fake_mt5():
     Position = namedtuple("Position", "type volume price_open price_current profit ticket symbol")
     Result = namedtuple("Result", "retcode order deal volume price comment")
     Check = namedtuple("Check", "comment")
+    Terminal = namedtuple(
+        "Terminal",
+        "connected trade_allowed tradeapi_disabled path data_path commondata_path name build",
+    )
 
     mod = types.SimpleNamespace()
     mod.POSITION_TYPE_BUY = 0
@@ -48,6 +52,16 @@ def _fake_mt5():
     mod.initialize = lambda **kwargs: True
     mod.shutdown = lambda: None
     mod.last_error = lambda: (0, "")
+    mod.terminal_info = lambda: Terminal(
+        True,
+        True,
+        False,
+        r"C:\Program Files\CPT Markets MT5 Terminal",
+        r"C:\Users\Administrator\AppData\Roaming\MetaQuotes\Terminal\CPT",
+        r"C:\Users\Administrator\AppData\Roaming\MetaQuotes\Terminal\Common",
+        "CPT Markets MT5 Terminal",
+        5836,
+    )
     mod.account_info = lambda: Account(1, "CPT-Demo", "Demo", "CPT Markets", "USD", 1000, 1005, 10, 995)
     mod.symbol_info = lambda symbol: SymbolInfo(True, 0.01, 100.0, 0.01) if symbol == "XAUUSD" else None
     mod.symbol_select = lambda symbol, visible: True
@@ -80,7 +94,13 @@ def test_mt5_client_market_and_reduce_only_orders(monkeypatch):
 
     client = MT5Client(MT5Config(login=1, password="pw", server="CPT-Demo"))
     assert client.connect() is True
-    assert client.get_account_summary()["freeMargin"] == 995
+    account = client.get_account_summary()
+    assert account["freeMargin"] == 995
+    assert account["tradingReady"] is True
+    assert account["terminal"]["tradeAllowed"] is True
+    status = client.get_connection_status()
+    assert status["tradingReady"] is True
+    assert status["terminal"]["dataPath"].endswith(r"MetaQuotes\Terminal\CPT")
     assert client.get_ticker("XAU/USD")["last"] == 2300.25
     assert len(client.get_kline("XAUUSD", "1H", 2)) == 2
 
@@ -142,6 +162,22 @@ def test_mt5_rejected_order_is_not_reported_as_fill(monkeypatch):
         assert "AutoTrading disabled" in str(exc)
     else:
         raise AssertionError("expected rejected MT5 order to fail")
+
+
+def test_mt5_rejects_order_before_send_when_backend_terminal_cannot_trade(monkeypatch):
+    fake = _fake_mt5()
+    terminal = fake.terminal_info()
+    fake.terminal_info = lambda: terminal._replace(trade_allowed=False)
+    monkeypatch.setitem(sys.modules, "MetaTrader5", fake)
+    monkeypatch.setattr(mt5_client_module, "_mt5", None)
+
+    client = MT5Client(MT5Config(login=1, password="pw", server="CPT-Demo"))
+    result = client.place_market_order("XAUUSD", "buy", 0.02)
+
+    assert result.success is False
+    assert "trade_allowed=false" in result.message
+    assert "data_path=" in result.message
+    assert fake.sent == []
 
 
 def test_mt5_connect_accepts_saved_credential_id(monkeypatch):
