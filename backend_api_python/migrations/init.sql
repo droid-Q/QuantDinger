@@ -452,6 +452,73 @@ CREATE INDEX IF NOT EXISTS idx_trades_created_at ON qd_strategy_trades(created_a
 CREATE INDEX IF NOT EXISTS idx_trades_strategy_symbol_canon ON qd_strategy_trades (strategy_id, market_type, symbol_canonical);
 CREATE INDEX IF NOT EXISTS idx_positions_strategy_leg ON qd_strategy_positions (strategy_id, market_type, symbol_canonical, side);
 
+-- Exchange-settled funding cash flow. Positive amount means the strategy
+-- received funding; negative means it paid funding.
+CREATE TABLE IF NOT EXISTS qd_strategy_funding_fees (
+    id SERIAL PRIMARY KEY,
+    user_id INTEGER NOT NULL DEFAULT 1 REFERENCES qd_users(id) ON DELETE CASCADE,
+    strategy_id INTEGER NOT NULL REFERENCES qd_strategies_trading(id) ON DELETE CASCADE,
+    credential_id INTEGER NOT NULL DEFAULT 0,
+    exchange_id VARCHAR(40) NOT NULL DEFAULT '',
+    symbol VARCHAR(50) NOT NULL DEFAULT '',
+    asset VARCHAR(20) NOT NULL DEFAULT 'USDT',
+    amount DECIMAL(24, 8) NOT NULL DEFAULT 0,
+    allocation_ratio DECIMAL(20, 12) NOT NULL DEFAULT 1,
+    external_id VARCHAR(160) NOT NULL,
+    occurred_at TIMESTAMP NOT NULL,
+    raw_json JSONB NOT NULL DEFAULT '{}'::jsonb,
+    created_at TIMESTAMP NOT NULL DEFAULT NOW(),
+    UNIQUE (credential_id, exchange_id, external_id, strategy_id)
+);
+CREATE INDEX IF NOT EXISTS idx_strategy_funding_strategy_time
+ON qd_strategy_funding_fees(strategy_id, occurred_at);
+CREATE INDEX IF NOT EXISTS idx_strategy_funding_credential
+ON qd_strategy_funding_fees(credential_id, exchange_id, external_id);
+
+-- Broker-posted account activities attributed to strategy-generated orders.
+-- Amount is the signed cash impact: negative is a fee/interest debit, positive is a credit.
+CREATE TABLE IF NOT EXISTS qd_strategy_broker_activities (
+    id SERIAL PRIMARY KEY,
+    user_id INTEGER NOT NULL REFERENCES qd_users(id) ON DELETE CASCADE,
+    strategy_id INTEGER NOT NULL REFERENCES qd_strategies_trading(id) ON DELETE CASCADE,
+    credential_id INTEGER NOT NULL DEFAULT 0,
+    broker_id VARCHAR(40) NOT NULL DEFAULT '',
+    activity_type VARCHAR(24) NOT NULL DEFAULT '',
+    activity_subtype VARCHAR(24) NOT NULL DEFAULT '',
+    symbol VARCHAR(50) NOT NULL DEFAULT '',
+    currency VARCHAR(16) NOT NULL DEFAULT 'USD',
+    amount DECIMAL(24, 8) NOT NULL DEFAULT 0,
+    account_amount DECIMAL(24, 8) NOT NULL DEFAULT 0,
+    allocation_ratio DECIMAL(20, 12) NOT NULL DEFAULT 1,
+    allocation_reason VARCHAR(40) NOT NULL DEFAULT '',
+    external_id VARCHAR(180) NOT NULL,
+    occurred_at TIMESTAMP NOT NULL,
+    raw_json JSONB NOT NULL DEFAULT '{}'::jsonb,
+    created_at TIMESTAMP NOT NULL DEFAULT NOW(),
+    UNIQUE (credential_id, broker_id, external_id, strategy_id)
+);
+CREATE INDEX IF NOT EXISTS idx_broker_activity_strategy_time
+ON qd_strategy_broker_activities(strategy_id, occurred_at);
+CREATE INDEX IF NOT EXISTS idx_broker_activity_credential
+ON qd_strategy_broker_activities(credential_id, broker_id, external_id);
+
+-- Five-minute mark-to-market history used to calculate a strategy's true
+-- local-day equity change, including the change in unrealized P&L on positions
+-- carried across midnight.
+CREATE TABLE IF NOT EXISTS qd_strategy_equity_snapshots (
+    id BIGSERIAL PRIMARY KEY,
+    user_id INTEGER NOT NULL REFERENCES qd_users(id) ON DELETE CASCADE,
+    strategy_id INTEGER NOT NULL REFERENCES qd_strategies_trading(id) ON DELETE CASCADE,
+    equity DECIMAL(24,8) NOT NULL DEFAULT 0,
+    realized_pnl DECIMAL(24,8) NOT NULL DEFAULT 0,
+    unrealized_pnl DECIMAL(24,8) NOT NULL DEFAULT 0,
+    captured_at TIMESTAMP NOT NULL DEFAULT NOW()
+);
+CREATE INDEX IF NOT EXISTS idx_strategy_equity_snapshots_boundary
+ON qd_strategy_equity_snapshots(strategy_id, captured_at DESC);
+CREATE INDEX IF NOT EXISTS idx_strategy_equity_snapshots_user
+ON qd_strategy_equity_snapshots(user_id, captured_at DESC);
+
 -- Strategy AI review report history.
 CREATE TABLE IF NOT EXISTS qd_strategy_review_reports (
     id SERIAL PRIMARY KEY,
@@ -540,6 +607,10 @@ CREATE TABLE IF NOT EXISTS qd_grid_resting_orders (
     updated_at TIMESTAMP DEFAULT NOW()
 );
 CREATE INDEX IF NOT EXISTS idx_grid_resting_strategy ON qd_grid_resting_orders(strategy_id, status);
+
+ALTER TABLE qd_strategy_trades ADD COLUMN IF NOT EXISTS grid_order_id BIGINT NOT NULL DEFAULT 0;
+CREATE INDEX IF NOT EXISTS idx_strategy_trades_grid_order
+  ON qd_strategy_trades(grid_order_id) WHERE grid_order_id > 0;
 
 -- =============================================================================
 -- 5. Pending Orders Queue
@@ -1711,6 +1782,133 @@ CREATE TABLE IF NOT EXISTS strategy_order_fills (
 );
 CREATE INDEX IF NOT EXISTS idx_strategy_order_fills_intent ON strategy_order_fills(order_intent_id);
 CREATE INDEX IF NOT EXISTS idx_strategy_order_fills_strategy ON strategy_order_fills(strategy_id, filled_at DESC);
+
+-- =============================================================================
+-- Unified live execution stream ledger
+-- =============================================================================
+
+ALTER TABLE pending_orders ADD COLUMN IF NOT EXISTS client_order_id VARCHAR(100) NOT NULL DEFAULT '';
+ALTER TABLE pending_orders ADD COLUMN IF NOT EXISTS fee_status VARCHAR(24) NOT NULL DEFAULT 'pending';
+ALTER TABLE pending_orders ADD COLUMN IF NOT EXISTS fee_source VARCHAR(24) NOT NULL DEFAULT '';
+
+ALTER TABLE qd_strategy_trades ADD COLUMN IF NOT EXISTS execution_event_id BIGINT NOT NULL DEFAULT 0;
+ALTER TABLE qd_strategy_trades ADD COLUMN IF NOT EXISTS exchange_fill_id VARCHAR(160) NOT NULL DEFAULT '';
+ALTER TABLE qd_strategy_trades ADD COLUMN IF NOT EXISTS fee_status VARCHAR(24) NOT NULL DEFAULT 'pending';
+ALTER TABLE qd_strategy_trades ADD COLUMN IF NOT EXISTS fee_source VARCHAR(24) NOT NULL DEFAULT '';
+CREATE UNIQUE INDEX IF NOT EXISTS uq_strategy_trades_execution_event
+  ON qd_strategy_trades(execution_event_id) WHERE execution_event_id > 0;
+
+ALTER TABLE strategy_order_fills ADD COLUMN IF NOT EXISTS credential_id INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE strategy_order_fills ADD COLUMN IF NOT EXISTS commission_quote DECIMAL(28, 12);
+ALTER TABLE strategy_order_fills ADD COLUMN IF NOT EXISTS fee_status VARCHAR(24) NOT NULL DEFAULT 'pending';
+CREATE UNIQUE INDEX IF NOT EXISTS uq_strategy_order_fills_exchange_fill
+  ON strategy_order_fills(exchange_id, credential_id, exchange_fill_id)
+  WHERE exchange_fill_id <> '';
+
+CREATE TABLE IF NOT EXISTS qd_live_order_bindings (
+    id BIGSERIAL PRIMARY KEY,
+    credential_id INTEGER NOT NULL DEFAULT 0,
+    exchange_id VARCHAR(50) NOT NULL,
+    market_type VARCHAR(20) NOT NULL DEFAULT 'swap',
+    owner_type VARCHAR(24) NOT NULL,
+    owner_id BIGINT NOT NULL DEFAULT 0,
+    user_id INTEGER NOT NULL DEFAULT 1,
+    strategy_id INTEGER NOT NULL DEFAULT 0,
+    pending_order_id BIGINT NOT NULL DEFAULT 0,
+    strategy_run_id BIGINT NOT NULL DEFAULT 0,
+    order_intent_id BIGINT NOT NULL DEFAULT 0,
+    symbol VARCHAR(80) NOT NULL DEFAULT '',
+    signal_type VARCHAR(40) NOT NULL DEFAULT '',
+    client_order_id VARCHAR(100) NOT NULL DEFAULT '',
+    exchange_order_id VARCHAR(160) NOT NULL DEFAULT '',
+    observed_filled DECIMAL(28, 12) NOT NULL DEFAULT 0,
+    status VARCHAR(24) NOT NULL DEFAULT 'open',
+    created_at TIMESTAMP NOT NULL DEFAULT NOW(),
+    updated_at TIMESTAMP NOT NULL DEFAULT NOW()
+);
+CREATE UNIQUE INDEX IF NOT EXISTS uq_live_order_binding_owner
+  ON qd_live_order_bindings(owner_type, owner_id);
+CREATE INDEX IF NOT EXISTS idx_live_order_binding_client
+  ON qd_live_order_bindings(credential_id, exchange_id, market_type, client_order_id);
+CREATE INDEX IF NOT EXISTS idx_live_order_binding_exchange
+  ON qd_live_order_bindings(credential_id, exchange_id, market_type, exchange_order_id);
+
+CREATE TABLE IF NOT EXISTS qd_execution_events (
+    id BIGSERIAL PRIMARY KEY,
+    event_key VARCHAR(320) NOT NULL UNIQUE,
+    credential_id INTEGER NOT NULL DEFAULT 0,
+    user_id INTEGER NOT NULL DEFAULT 1,
+    exchange_id VARCHAR(50) NOT NULL,
+    market_type VARCHAR(20) NOT NULL DEFAULT 'swap',
+    account_id VARCHAR(128) NOT NULL DEFAULT '',
+    symbol VARCHAR(80) NOT NULL DEFAULT '',
+    exchange_order_id VARCHAR(160) NOT NULL DEFAULT '',
+    client_order_id VARCHAR(100) NOT NULL DEFAULT '',
+    exchange_fill_id VARCHAR(160) NOT NULL DEFAULT '',
+    side VARCHAR(12) NOT NULL DEFAULT '',
+    position_side VARCHAR(12) NOT NULL DEFAULT '',
+    order_status VARCHAR(24) NOT NULL DEFAULT '',
+    price DECIMAL(28, 12) NOT NULL DEFAULT 0,
+    quantity DECIMAL(28, 12) NOT NULL DEFAULT 0,
+    cumulative_quantity DECIMAL(28, 12) NOT NULL DEFAULT 0,
+    is_cumulative BOOLEAN NOT NULL DEFAULT FALSE,
+    realized_pnl DECIMAL(28, 12),
+    maker BOOLEAN,
+    fee_status VARCHAR(24) NOT NULL DEFAULT 'pending',
+    occurred_at TIMESTAMP NOT NULL,
+    received_at TIMESTAMP NOT NULL DEFAULT NOW(),
+    raw_json JSONB NOT NULL DEFAULT '{}'::jsonb,
+    processed_at TIMESTAMP,
+    process_attempts INTEGER NOT NULL DEFAULT 0,
+    process_error TEXT NOT NULL DEFAULT ''
+);
+CREATE INDEX IF NOT EXISTS idx_execution_events_pending
+  ON qd_execution_events(received_at, id) WHERE processed_at IS NULL;
+CREATE INDEX IF NOT EXISTS idx_execution_events_order
+  ON qd_execution_events(credential_id, exchange_id, market_type, exchange_order_id);
+
+CREATE TABLE IF NOT EXISTS qd_execution_fee_components (
+    id BIGSERIAL PRIMARY KEY,
+    execution_event_id BIGINT NOT NULL REFERENCES qd_execution_events(id) ON DELETE CASCADE,
+    fee_type VARCHAR(24) NOT NULL DEFAULT 'trade',
+    currency VARCHAR(24) NOT NULL DEFAULT '',
+    amount DECIMAL(28, 12) NOT NULL DEFAULT 0,
+    quote_amount DECIMAL(28, 12),
+    source VARCHAR(24) NOT NULL DEFAULT 'websocket',
+    created_at TIMESTAMP NOT NULL DEFAULT NOW(),
+    UNIQUE(execution_event_id, fee_type, currency)
+);
+CREATE INDEX IF NOT EXISTS idx_execution_fee_event
+  ON qd_execution_fee_components(execution_event_id);
+
+CREATE TABLE IF NOT EXISTS qd_execution_fee_projections (
+    execution_event_id BIGINT PRIMARY KEY REFERENCES qd_execution_events(id) ON DELETE CASCADE,
+    pending_order_id BIGINT NOT NULL DEFAULT 0,
+    applied_at TIMESTAMP NOT NULL DEFAULT NOW()
+);
+
+CREATE TABLE IF NOT EXISTS qd_execution_owner_projections (
+    execution_event_id BIGINT NOT NULL REFERENCES qd_execution_events(id) ON DELETE CASCADE,
+    owner_type VARCHAR(24) NOT NULL,
+    owner_id BIGINT NOT NULL DEFAULT 0,
+    applied_at TIMESTAMP NOT NULL DEFAULT NOW(),
+    PRIMARY KEY (execution_event_id, owner_type, owner_id)
+);
+
+CREATE TABLE IF NOT EXISTS qd_execution_stream_health (
+    stream_key VARCHAR(180) PRIMARY KEY,
+    credential_id INTEGER NOT NULL DEFAULT 0,
+    exchange_id VARCHAR(50) NOT NULL,
+    market_type VARCHAR(20) NOT NULL DEFAULT '',
+    state VARCHAR(24) NOT NULL DEFAULT 'stopped',
+    last_event_at TIMESTAMP,
+    last_connected_at TIMESTAMP,
+    last_disconnected_at TIMESTAMP,
+    reconnect_count INTEGER NOT NULL DEFAULT 0,
+    rest_fallback BOOLEAN NOT NULL DEFAULT FALSE,
+    last_error TEXT NOT NULL DEFAULT '',
+    updated_at TIMESTAMP NOT NULL DEFAULT NOW()
+);
 
 CREATE TABLE IF NOT EXISTS strategy_runtime_events (
     id SERIAL PRIMARY KEY,

@@ -68,7 +68,7 @@ cp env.example .env
 At minimum, replace these values before a shared or production deployment:
 
 ```dotenv
-SECRET_KEY=<independent-random-value-at-least-32-bytes>
+SECRET_KEY=<independent-random-value-at-least-10-bytes-32-plus-recommended>
 CREDENTIAL_ENCRYPTION_KEY=<independent-random-value-at-least-32-bytes>
 ADMIN_USER=<initial-admin-name>
 ADMIN_PASSWORD=<strong-initial-password>
@@ -125,7 +125,7 @@ Create an environment and install development dependencies:
 ```bash
 python -m venv .venv
 python -m pip install --upgrade pip
-python -m pip install -r requirements-dev.txt
+python -m pip install -r requirements.lock -r requirements-dev.txt
 ```
 
 Apply migrations:

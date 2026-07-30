@@ -109,7 +109,7 @@ class DataSourceFactory:
         Normalize a market category string.
 
         IMPORTANT: empty / unknown input used to silently degrade to "Crypto",
-        which made stock symbols like TSLA quietly route to CCXT/Coinbase. We
+        which made stock symbols like TSLA quietly route to a crypto provider. We
         keep that fallback for backward compatibility (some callers still rely
         on it) but emit a loud WARNING so the misroute is no longer invisible.
         Always pass a real market category from the caller.
@@ -293,10 +293,14 @@ class DataSourceFactory:
             mt = "swap"
         if ex in _MT5_EXCHANGE_ALIASES:
             return cls.get_source("MT5")
-        if market == "Crypto" and (ex or mt == "swap"):
+        if market == "Crypto" and ex:
             from app.data_sources.crypto import CryptoDataSource
 
             return CryptoDataSource.for_exchange(ex, mt or "swap")
+        if market == "Crypto" and mt == "swap":
+            from app.data_sources.crypto import CryptoDataSource
+
+            return CryptoDataSource.for_public_market("swap")
         return cls.get_source(market)
 
     @classmethod

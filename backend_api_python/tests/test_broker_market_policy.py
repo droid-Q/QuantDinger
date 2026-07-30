@@ -203,7 +203,7 @@ class TestValidateIllegalCombos:
             )
 
     def test_binance_cannot_trade_forex(self):
-        with pytest.raises(ValueError, match="not supported for live trading"):
+        with pytest.raises(ValueError, match="cannot trade market_category='Forex'"):
             validate_strategy_config(
                 exchange_id="binance",
                 market_category="Forex",
@@ -224,7 +224,7 @@ class TestValidateIllegalCombos:
     def test_removed_crypto_exchange_rejected(self):
         with pytest.raises(ValueError, match="Unknown exchange_id"):
             validate_strategy_config(
-                exchange_id="coinbaseexchange",
+                exchange_id="retiredexchange",
                 market_category="Crypto",
                 market_type="swap",
             )

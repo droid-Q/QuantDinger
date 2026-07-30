@@ -292,6 +292,33 @@ class BitgetMixClient(BaseRestClient):
                 raise LiveTradingError(f"Bitget error: {data}")
         return data if isinstance(data, dict) else {"raw": data}
 
+    def get_funding_payments(self, *, symbol: str, start_time_ms: int, end_time_ms: int, limit: int = 100):
+        raw = self._signed_request(
+            "GET",
+            "/api/v2/mix/account/bill",
+            params={
+                "productType": "USDT-FUTURES",
+                "businessType": "contract_settle_fee",
+                "startTime": int(start_time_ms),
+                "endTime": int(end_time_ms),
+                "limit": min(100, max(1, int(limit or 100))),
+            },
+        )
+        data = raw.get("data") or {}
+        rows = data.get("bills") if isinstance(data, dict) else []
+        out = []
+        for item in rows or []:
+            if not isinstance(item, dict):
+                continue
+            amount = float(item.get("amount") or 0.0)
+            out.append({
+                "id": str(item.get("billId") or f"{item.get('cTime')}:{amount}"),
+                "symbol": str(item.get("symbol") or symbol), "amount": amount,
+                "asset": str(item.get("coin") or "USDT").upper(), "time": int(item.get("cTime") or 0),
+                "raw": item,
+            })
+        return out
+
     def _post_mix_place_order(
         self,
         body: Dict[str, Any],
@@ -420,8 +447,10 @@ class BitgetMixClient(BaseRestClient):
         hold_side: str = "",
     ) -> Dict[str, Any]:
         """
-        Bitget mix place-order: hedge_mode requires tradeSide open/close; one_way_mode requires reduceOnly YES/NO
-        and must not send tradeSide (see Bitget API doc + CCXT bitget.py).
+        Bitget mix place-order: hedge_mode requires tradeSide open/close and
+        uses ``side`` as the position direction; one_way_mode requires
+        reduceOnly YES/NO and must not send tradeSide. ``holdSide`` belongs to
+        other Bitget endpoints and is not a v2 place-order parameter.
         """
         sd = (side or "").lower()
         if sd not in ("buy", "sell"):
@@ -431,19 +460,19 @@ class BitgetMixClient(BaseRestClient):
         )
         hedge = pos_mode == "hedge_mode"
         if hedge:
-            # Mirror CCXT: hedge close flips side; hedge open keeps side + tradeSide open.
-            out: Dict[str, Any] = {
-                "tradeSide": "close" if reduce_only else "open",
-                "side": ("sell" if sd == "buy" else "buy") if reduce_only else sd,
-            }
             hs = str(hold_side or "").strip().lower()
             if hs in ("long", "short"):
-                out["holdSide"] = hs
-            elif reduce_only:
-                # close long -> sell+close holdSide long; close short -> buy+close holdSide short
-                out["holdSide"] = "long" if out["side"] == "sell" else "short"
+                direction_side = "buy" if hs == "long" else "sell"
             else:
-                out["holdSide"] = "long" if sd == "buy" else "short"
+                # The shared signal uses the physical order side. Bitget hedge
+                # mode instead expects the position direction on closes.
+                direction_side = (
+                    ("sell" if sd == "buy" else "buy") if reduce_only else sd
+                )
+            out: Dict[str, Any] = {
+                "tradeSide": "close" if reduce_only else "open",
+                "side": direction_side,
+            }
             return out
         return {"side": sd, "reduceOnly": "YES" if reduce_only else "NO"}
 
@@ -697,6 +726,23 @@ class BitgetMixClient(BaseRestClient):
             lv = 0
         if not sym or lv <= 0:
             return False
+        try:
+            contract = self.get_contract(symbol=symbol, product_type=pt) or {}
+        except Exception:
+            contract = {}
+        max_raw = (
+            contract.get("maxLever")
+            or contract.get("maxLeverage")
+            or contract.get("maxLeverRate")
+        )
+        try:
+            max_leverage = int(float(max_raw or 0))
+        except (TypeError, ValueError):
+            max_leverage = 0
+        if max_leverage > 0 and lv > max_leverage:
+            raise LiveTradingError(
+                f"Bitget leverage {lv}x exceeds the current {sym} maximum {max_leverage}x"
+            )
 
         cache_key = f"{pt}:{sym}:{mc}:{mm}:{hs}:{lv}"
         now = time.time()
@@ -720,9 +766,31 @@ class BitgetMixClient(BaseRestClient):
         try:
             resp = self._signed_request("POST", "/api/v2/mix/account/set-leverage", json_body=body)
             ok = isinstance(resp, dict) and str(resp.get("code") or "") in ("00000", "0", "")
+            data = resp.get("data") if isinstance(resp, dict) else None
+            if ok and isinstance(data, dict):
+                candidate_keys = (
+                    ("longLeverage", "shortLeverage")
+                    if hs not in ("long", "short")
+                    else (f"{hs}Leverage", "leverage")
+                )
+                effective_values = []
+                for key in candidate_keys:
+                    if data.get(key) not in (None, ""):
+                        try:
+                            effective_values.append(int(float(data.get(key))))
+                        except (TypeError, ValueError) as exc:
+                            raise LiveTradingError(
+                                f"Bitget returned an invalid effective leverage: {data.get(key)}"
+                            ) from exc
+                if effective_values and any(value != lv for value in effective_values):
+                    raise LiveTradingError(
+                        f"Bitget applied {effective_values} instead of requested {lv}x leverage"
+                    )
             if ok:
                 self._lev_cache[cache_key] = (now, True)
             return bool(ok)
+        except LiveTradingError:
+            raise
         except Exception:
             return False
 
@@ -999,6 +1067,7 @@ class BitgetMixClient(BaseRestClient):
                 total_quote = Decimal("0")
                 total_fee = Decimal("0")
                 fee_ccy = ""
+                fees_by_ccy: Dict[str, float] = {}
                 if isinstance(fill_list, list):
                     for f in fill_list:
                         try:
@@ -1034,9 +1103,12 @@ class BitgetMixClient(BaseRestClient):
                                 total_quote += sz_base * px
                             if fee != 0:
                                 # Fees may be negative; store absolute cost.
-                                total_fee += abs(fee)
+                                abs_fee = abs(fee)
+                                total_fee += abs_fee
                                 if (not fee_ccy) and ccy:
                                     fee_ccy = ccy
+                                fee_key = ccy.upper() if ccy else "UNKNOWN"
+                                fees_by_ccy[fee_key] = fees_by_ccy.get(fee_key, 0.0) + float(abs_fee)
                         except Exception:
                             continue
                 if total_base > 0 and total_quote > 0:
@@ -1052,6 +1124,7 @@ class BitgetMixClient(BaseRestClient):
                         "avg_price": float(total_quote / total_base),
                         "fee": float(total_fee),
                         "fee_ccy": str(fee_ccy or ""),
+                        "fees_by_ccy": fees_by_ccy,
                         "state": state,
                         "detail": last_detail,
                         "fills": last_fills,
@@ -1089,6 +1162,7 @@ class BitgetMixClient(BaseRestClient):
                             "avg_price": avg,
                             "fee": float(abs_fee),
                             "fee_ccy": str(dccy or ""),
+                            "fees_by_ccy": ({str(dccy).upper(): float(abs_fee)} if abs_fee > 0 else {}),
                             "state": state,
                             "detail": last_detail,
                             "fills": last_fills,
@@ -1106,6 +1180,7 @@ class BitgetMixClient(BaseRestClient):
                             "avg_price": avg,
                             "fee": float(abs_fee),
                             "fee_ccy": str(dccy or ""),
+                            "fees_by_ccy": ({str(dccy).upper(): float(abs_fee)} if abs_fee > 0 else {}),
                             "state": state,
                             "detail": last_detail,
                             "fills": last_fills,
@@ -1131,5 +1206,3 @@ class BitgetMixClient(BaseRestClient):
                     }
                 return {"filled": 0.0, "avg_price": 0.0, "fee": 0.0, "fee_ccy": "", "state": state, "detail": last_detail, "fills": last_fills}
             time.sleep(float(poll_interval_sec or 0.5))
-
-

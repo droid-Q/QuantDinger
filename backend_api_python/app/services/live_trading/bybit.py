@@ -218,18 +218,20 @@ class BybitClient(BaseRestClient):
         self._time_offset_ms = int(srv_ms - local_ms)
         self._time_offset_at = now
 
-    def is_hedge_position_mode(self, *, symbol: str) -> bool:
+    def is_hedge_position_mode(self, *, symbol: str) -> Optional[bool]:
         """
         Whether the Bybit account uses hedge (both-side) mode for ``symbol``.
 
-        Queries GET /v5/position/list (returns slots even when flat). Falls back to
-        ``hedge_mode`` from credentials when the API call fails.
+        Queries GET /v5/position/list (returns slots even when flat). ``None``
+        means the exchange did not provide enough authoritative information.
+        Callers performing deployment/preflight checks must fail closed instead
+        of treating the locally configured ``hedge_mode`` hint as proof.
         """
         if self.category != "linear":
-            return bool(self.hedge_mode)
+            return False
         sym = to_bybit_symbol(symbol)
         if not sym:
-            return bool(self.hedge_mode)
+            return None
         key = sym.upper()
         now = time.time()
         cached = self._pos_mode_cache.get(key)
@@ -257,7 +259,9 @@ class BybitClient(BaseRestClient):
                 detected = True
         except Exception:
             detected = None
-        hedge = bool(self.hedge_mode) if detected is None else bool(detected)
+        if detected is None:
+            return None
+        hedge = bool(detected)
         self._pos_mode_cache[key] = (now, hedge)
         return hedge
 
@@ -267,7 +271,12 @@ class BybitClient(BaseRestClient):
         """
         if self.category != "linear":
             return 0
-        if not self.is_hedge_position_mode(symbol=symbol):
+        detected = self.is_hedge_position_mode(symbol=symbol)
+        # Direct order callers may still use the explicit credential hint when
+        # mode lookup is temporarily unavailable. Strategy deployment does not:
+        # its preflight calls ``is_hedge_position_mode`` and rejects ``None``.
+        hedge = bool(self.hedge_mode) if detected is None else bool(detected)
+        if not hedge:
             return 0
         ps = str(pos_side or "").strip().lower()
         if ps == "short":
@@ -347,6 +356,33 @@ class BybitClient(BaseRestClient):
         if last_err:
             raise last_err
         raise LiveTradingError("Bybit signed request failed after time resync")
+
+    def get_funding_payments(self, *, symbol: str, start_time_ms: int, end_time_ms: int, limit: int = 100):
+        sym = to_bybit_symbol(symbol)
+        raw = self._signed_request(
+            "GET",
+            "/v5/account/transaction-log",
+            params={"accountType": "UNIFIED", "category": "linear", "type": "SETTLEMENT",
+                    "startTime": int(start_time_ms), "endTime": int(end_time_ms),
+                    "limit": min(50, max(1, int(limit or 50)))},
+        )
+        result = raw.get("result") or {}
+        rows = result.get("list") if isinstance(result, dict) else []
+        out = []
+        for item in rows or []:
+            if not isinstance(item, dict) or str(item.get("symbol") or "").upper() != sym.upper():
+                continue
+            funding = item.get("funding")
+            if funding in (None, ""):
+                continue
+            amount = float(funding or 0.0)
+            out.append({
+                "id": str(item.get("id") or f"{item.get('transactionTime')}:{amount}"),
+                "symbol": str(item.get("symbol") or sym), "amount": amount,
+                "asset": str(item.get("currency") or "USDT").upper(),
+                "time": int(item.get("transactionTime") or 0), "raw": item,
+            })
+        return out
 
     def _public_request(self, method: str, path: str, *, params: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
         code, data, text = self._request(method, path, params=params, headers=None, json_body=None, data=None)
@@ -740,6 +776,57 @@ class BybitClient(BaseRestClient):
         first: Dict[str, Any] = lst[0] if isinstance(lst, list) and lst else {}
         return first if isinstance(first, dict) else {}
 
+    def get_executions(
+        self,
+        *,
+        symbol: str = "",
+        order_id: str = "",
+        client_order_id: str = "",
+    ) -> Dict[str, Any]:
+        """Return authoritative per-fill records for one Bybit order."""
+        params: Dict[str, Any] = {"category": self.category, "limit": 100}
+        if order_id:
+            params["orderId"] = str(order_id)
+        elif client_order_id:
+            params["orderLinkId"] = str(client_order_id)
+        elif symbol:
+            params["symbol"] = to_bybit_symbol(symbol)
+        else:
+            raise LiveTradingError("Bybit get_executions requires an order id or symbol")
+        return self._signed_request("GET", "/v5/execution/list", params=params)
+
+    def _execution_fee_breakdown(
+        self,
+        *,
+        symbol: str,
+        order_id: str,
+        client_order_id: str = "",
+    ) -> Dict[str, float]:
+        raw = self.get_executions(
+            symbol=symbol,
+            order_id=order_id,
+            client_order_id=client_order_id,
+        )
+        rows = (((raw.get("result") or {}).get("list")) if isinstance(raw, dict) else None) or []
+        fees: Dict[str, float] = {}
+        if not isinstance(rows, list):
+            return fees
+        default_ccy = "USDT" if self.category == "linear" else ""
+        for row in rows:
+            if not isinstance(row, dict):
+                continue
+            if order_id and str(row.get("orderId") or "") != str(order_id):
+                continue
+            try:
+                amount = abs(float(row.get("execFee") or 0.0))
+            except (TypeError, ValueError):
+                amount = 0.0
+            if amount <= 0:
+                continue
+            currency = str(row.get("feeCurrency") or default_ccy).strip().upper() or "UNKNOWN"
+            fees[currency] = fees.get(currency, 0.0) + amount
+        return fees
+
     def wait_for_fill(
         self,
         *,
@@ -770,21 +857,20 @@ class BybitClient(BaseRestClient):
             # Extract fee from cumExecFee (Bybit API field for cumulative execution fee)
             fee = 0.0
             fee_ccy = ""
+            fees_by_ccy: Dict[str, float] = {}
             fee_detail = last.get("cumFeeDetail") if isinstance(last, dict) else None
             if isinstance(fee_detail, dict) and fee_detail:
-                total_fee = 0.0
-                fee_keys = []
                 for k, v in fee_detail.items():
                     try:
                         fv = abs(float(v or 0.0))
                     except Exception:
                         fv = 0.0
                     if fv > 0:
-                        total_fee += fv
-                        fee_keys.append(str(k))
-                fee = total_fee
-                if len(fee_keys) == 1:
-                    fee_ccy = fee_keys[0]
+                        key = str(k or "").strip().upper() or "UNKNOWN"
+                        fees_by_ccy[key] = fees_by_ccy.get(key, 0.0) + fv
+                fee = sum(fees_by_ccy.values())
+                if len(fees_by_ccy) == 1:
+                    fee_ccy = next(iter(fees_by_ccy))
             if fee <= 0:
                 try:
                     fee = abs(float(last.get("cumExecFee") or 0.0))
@@ -792,19 +878,33 @@ class BybitClient(BaseRestClient):
                     fee = 0.0
                 if fee > 0 and self.category == "linear":
                     fee_ccy = "USDT"
+                    fees_by_ccy = {fee_ccy: fee}
+            if filled > 0:
+                try:
+                    execution_fees = self._execution_fee_breakdown(
+                        symbol=symbol,
+                        order_id=str(order_id or ""),
+                        client_order_id=str(client_order_id or ""),
+                    )
+                    if execution_fees:
+                        fees_by_ccy = execution_fees
+                        fee = sum(execution_fees.values())
+                        fee_ccy = next(iter(execution_fees)) if len(execution_fees) == 1 else "MIXED"
+                except Exception as exc:
+                    logger.debug("Bybit execution fee query failed for order %s: %s", order_id, exc)
             # cumExecFee / cumFeeDetail can lag slightly after fill shows up.
             if filled > 0 and avg_price > 0:
                 if fee <= 0 and not timed_out:
                     time.sleep(float(poll_interval_sec or 0.5))
                     continue
-                return {"filled": filled, "avg_price": avg_price, "fee": fee, "fee_ccy": fee_ccy, "status": status, "order": last}
+                return {"filled": filled, "avg_price": avg_price, "fee": fee, "fee_ccy": fee_ccy, "fees_by_ccy": fees_by_ccy, "status": status, "order": last}
             if status.lower() in ("filled", "cancelled", "canceled", "rejected"):
                 if fee <= 0 and filled > 0 and avg_price > 0 and not timed_out:
                     time.sleep(float(poll_interval_sec or 0.5))
                     continue
-                return {"filled": filled, "avg_price": avg_price, "fee": fee, "fee_ccy": fee_ccy, "status": status, "order": last}
+                return {"filled": filled, "avg_price": avg_price, "fee": fee, "fee_ccy": fee_ccy, "fees_by_ccy": fees_by_ccy, "status": status, "order": last}
             if timed_out:
-                return {"filled": filled, "avg_price": avg_price, "fee": fee, "fee_ccy": fee_ccy, "status": status, "order": last}
+                return {"filled": filled, "avg_price": avg_price, "fee": fee, "fee_ccy": fee_ccy, "fees_by_ccy": fees_by_ccy, "status": status, "order": last}
             time.sleep(float(poll_interval_sec or 0.5))
 
     def get_positions(
@@ -859,7 +959,21 @@ class BybitClient(BaseRestClient):
             lv = 1
         if lv < 1:
             lv = 1
-        # Bybit leverage caps vary per symbol; keep best-effort.
+        try:
+            info = self.get_instrument_info(category="linear", symbol=sym) or {}
+        except Exception:
+            info = {}
+        leverage_filter = info.get("leverageFilter") if isinstance(info, dict) else {}
+        try:
+            max_leverage = int(
+                float((leverage_filter or {}).get("maxLeverage") or 0)
+            )
+        except (TypeError, ValueError):
+            max_leverage = 0
+        if max_leverage > 0 and lv > max_leverage:
+            raise LiveTradingError(
+                f"Bybit leverage {lv}x exceeds the current {sym} maximum {max_leverage}x"
+            )
         body = {"category": "linear", "symbol": sym, "buyLeverage": str(lv), "sellLeverage": str(lv)}
         try:
             resp = self._signed_request("POST", "/v5/position/set-leverage", json_body=body)
@@ -893,5 +1007,3 @@ class BybitClient(BaseRestClient):
             if "not modified" in text or "110026" in text:
                 return True
             return False
-
-

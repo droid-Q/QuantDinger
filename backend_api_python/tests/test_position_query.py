@@ -14,7 +14,7 @@ def test_symbols_equivalent_compact_and_slash():
     assert not symbols_equivalent("ETH/USDT", "DOGE/USDT")
 
 
-def test_resolve_uses_exchange_when_db_missing(monkeypatch):
+def test_resolve_uses_exchange_when_db_missing_only_with_explicit_fallback(monkeypatch):
     monkeypatch.setattr(
         "app.services.live_trading.position_query.fetch_position_size_for_side",
         lambda *_a, **_k: 0.0,
@@ -31,10 +31,60 @@ def test_resolve_uses_exchange_when_db_missing(monkeypatch):
         client=MagicMock(),
         market_type="swap",
         exchange_config={},
+        allow_exchange_fallback=True,
     )
     assert amount == 99.0
     assert meta.get("filled_from") == "exchange"
     assert meta.get("db_missing") is True
+
+
+def test_resolve_rejects_strategy_close_when_db_position_is_missing(monkeypatch):
+    monkeypatch.setattr(
+        "app.services.live_trading.position_query.fetch_position_size_for_side",
+        lambda *_a, **_k: 0.0,
+    )
+    monkeypatch.setattr(
+        "app.services.live_trading.position_query.query_exchange_position_size",
+        lambda **_k: 2.0,
+    )
+
+    amount, meta = resolve_reduce_only_quantity(
+        strategy_id=1,
+        symbol="BTC/USDT",
+        pos_side="long",
+        requested_amount=0.0004,
+        client=MagicMock(),
+        market_type="spot",
+        exchange_config={},
+    )
+
+    assert amount == 0.0
+    assert meta.get("db_missing") is True
+    assert meta.get("blocked_by") == "strategy_position_missing"
+
+
+def test_resolve_spot_close_never_exceeds_strategy_owned_quantity(monkeypatch):
+    monkeypatch.setattr(
+        "app.services.live_trading.position_query.fetch_position_size_for_side",
+        lambda *_a, **_k: 0.0004,
+    )
+    monkeypatch.setattr(
+        "app.services.live_trading.position_query.query_exchange_position_size",
+        lambda **_k: 2.0,
+    )
+
+    amount, meta = resolve_reduce_only_quantity(
+        strategy_id=1,
+        symbol="BTC/USDT",
+        pos_side="long",
+        requested_amount=1.0,
+        client=MagicMock(),
+        market_type="spot",
+        exchange_config={},
+    )
+
+    assert amount == pytest.approx(0.0004)
+    assert meta.get("capped_by") == "db"
 
 
 def test_resolve_caps_to_db_when_smaller(monkeypatch):
@@ -209,3 +259,37 @@ def test_gate_flat_position_query_returns_zero_in_strict_mode():
         strict=True,
     )
     assert qty == 0.0
+
+
+def test_gate_dual_short_mode_is_not_misread_as_long():
+    from app.services.live_trading.gate import GateUsdtFuturesClient
+    from app.services.live_trading.position_query import query_exchange_position_size
+
+    class FakeGate(GateUsdtFuturesClient):
+        def __init__(self):
+            pass
+
+        def get_positions(self):
+            return [
+                {
+                    "contract": "BTC_USDT",
+                    "mode": "dual_short",
+                    "size": "2",
+                }
+            ]
+
+        def get_contract(self, *, contract):
+            return {"quanto_multiplier": "0.001"}
+
+    assert query_exchange_position_size(
+        client=FakeGate(),
+        symbol="BTC/USDT",
+        pos_side="short",
+        market_type="swap",
+    ) == pytest.approx(0.002)
+    assert query_exchange_position_size(
+        client=FakeGate(),
+        symbol="BTC/USDT",
+        pos_side="long",
+        market_type="swap",
+    ) == 0.0

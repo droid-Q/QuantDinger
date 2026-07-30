@@ -2,6 +2,7 @@ import os
 import sys
 import types
 from collections import namedtuple
+from inspect import unwrap
 
 from flask import Flask, g
 
@@ -250,7 +251,7 @@ def test_mt5_connect_accepts_saved_credential_id(monkeypatch):
 
     with app.test_request_context(json={"credential_id": 7}):
         g.user_id = 1
-        response = mt5_routes.connect.__wrapped__()
+        response = unwrap(mt5_routes.connect)()
 
     body = response.get_json()
     assert body["success"] is True

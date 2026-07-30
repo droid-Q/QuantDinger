@@ -255,6 +255,22 @@ def get_positions():
                     or 0
                 )
                 mirror = None
+                # Self-heal rows created by older JSONB parsing that lost the
+                # credential id. Size and cost basis remain untouched.
+                if cred_id > 0:
+                    with get_db_connection() as db:
+                        cur = db.cursor()
+                        cur.execute(
+                            """
+                            UPDATE qd_strategy_positions
+                            SET credential_id = %s
+                            WHERE strategy_id = %s
+                              AND COALESCE(credential_id, 0) = 0
+                            """,
+                            (cred_id, int(strategy_id)),
+                        )
+                        db.commit()
+                        cur.close()
                 if exchange_id in {"mt5", "cptmarkets", "cpt_markets"}:
                     mirror = live_account_mirror_for_strategy(
                         strategy_id=int(strategy_id),
