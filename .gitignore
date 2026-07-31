@@ -101,3 +101,4 @@ docker-compose.override.yml
 /AGENTS.md
 backend.env
 quantdinger-mt5-images*.tar
+/backend_api_python.zip
