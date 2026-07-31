@@ -686,6 +686,9 @@ class TradingExecutor:
             strategy_name = str(strategy.get("strategy_name") or f"strategy_{strategy_id}")
             notification_config = _json_object(strategy.get("notification_config"))
             leverage = max(1.0, float(trading_config.get("leverage") or strategy.get("leverage") or 1))
+            from app.services.strategy_live_guard import resolve_strategy_direction_mode
+
+            direction_mode = resolve_strategy_direction_mode(strategy)
             append_strategy_log(
                 strategy_id,
                 "info",
@@ -728,6 +731,7 @@ class TradingExecutor:
                             signal_ts=int(time.time()),
                             strategy_run_id=run_id,
                             current_price_override=current_prices.get(str(intent.symbol)),
+                            direction_mode=direction_mode,
                         )
                         if not submitted:
                             session.release_protection_exit(
@@ -796,6 +800,7 @@ class TradingExecutor:
                                     if execution_mode == "live"
                                     else None
                                 ),
+                                direction_mode=direction_mode,
                             )
                             submitted_count += int(submitted)
                             if intent.client_order_id:
@@ -918,6 +923,7 @@ class TradingExecutor:
         signal_ts: int,
         strategy_run_id: int = 0,
         current_price_override: float | None = None,
+        direction_mode: str = "",
     ) -> bool:
         member = next(
             (item for item in candidates if str(item.get("key") or "") == str(intent.symbol)),
@@ -955,6 +961,11 @@ class TradingExecutor:
             leverage=leverage,
             market_type=market_type,
         )
+        if execution_mode == "live":
+            target_amount = self._direction_constrained_target(
+                target_amount,
+                direction_mode=direction_mode,
+            )
         if (
             market_type == "spot"
             and market_category.lower() not in {"forex", "mt5"}
@@ -999,6 +1010,15 @@ class TradingExecutor:
                 skip_reason="no_order_required",
             )
             return False
+        if (
+            execution_mode == "live"
+            and len(requests) > 1
+            and requests[0][0] in {"close_long", "close_short"}
+        ):
+            # Reversal orders are asynchronous.  Wait for the closing leg to
+            # fill and for the strategy ledger to synchronize before sizing
+            # the opposite entry.
+            requests = requests[:1]
         submitted = False
         for action, quantity in requests:
             submitted = bool(self._execute_signal(
@@ -1090,6 +1110,13 @@ class TradingExecutor:
                 "source": "strategy_v2",
             },
         )
+        inflight_check = getattr(self.order_gateway, "has_inflight", None)
+        if (
+            request.execution_mode == "live"
+            and callable(inflight_check)
+            and inflight_check(request)
+        ):
+            return False
         pending_id = self.order_gateway.submit(request)
         if pending_id:
             append_strategy_log(
@@ -1548,6 +1575,22 @@ class TradingExecutor:
         if intent.kind == "target_percent":
             return capital * float(intent.value) * notional_multiplier / price
         raise RuntimeError(f"strategyV2.orderKindUnsupported:{intent.kind}")
+
+    @staticmethod
+    def _direction_constrained_target(
+        target: float,
+        *,
+        direction_mode: str = "",
+    ) -> float:
+        from app.services.strategy_direction import normalize_direction_mode
+
+        mode = normalize_direction_mode(direction_mode)
+        value = float(target or 0.0)
+        if mode == "long_only" and value < 0:
+            return 0.0
+        if mode == "short_only" and value > 0:
+            return 0.0
+        return value
 
     @staticmethod
     def _order_plan(current: float, target: float) -> list[tuple[str, float]]:
