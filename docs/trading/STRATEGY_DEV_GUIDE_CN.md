@@ -280,6 +280,13 @@ def initialize(context):
 
 实盘会对每根已收盘 bar 只处理一次，并在当前会话存活期间保留 <code>g</code> 状态。重复收到同一根 bar 不应重复触发策略。跨重启状态需要显式开启，见第 9 节。
 
+### 已完成 K 线与实时价格的边界
+
+- <code>get_history</code>、<code>data.current</code>、<code>data.history</code> 和指标函数看到的最后一行必须是已经完成的 K 线。实时成交价或 mark price 不能回写、覆盖或延长这根 K 线的 OHLC。
+- 均线、突破、形态、因子和其他入场/加仓信号只能根据已完成 K 线计算，保证回测、实盘和重启重放具有相同语义。
+- 实时价格仅供止损、止盈、追踪止损和权益风控使用；它不能把一根尚未收盘的 K 线伪装成完成 bar，也不能改变已经确认的策略信号。
+- 如果产品以后提供独立的逐 tick 策略契约，应使用单独的 API、回测模型和文档；不要在普通 Strategy API V2 源码中自行模拟。
+
 ---
 
 ## 9. context、data 和 g
@@ -418,6 +425,17 @@ short_position = get_position(g.symbol, position_side="short")
 
 在 hedge mode 下，不要把 <code>get_position(symbol)</code> 当成自动合成的净仓位。<code>get_positions()</code> 可能包含 <code>symbol::long</code>、<code>symbol::short</code> 这样的分腿键。判断某条腿是否有仓时建议使用 <code>abs(position.amount)</code>。
 
+不要混淆下面几个不同层级的定义：
+
+| 名称 | 所属层级 | 含义 |
+| --- | --- | --- |
+| <code>direction_mode</code> | 策略清单 | 策略被允许使用的方向能力：<code>long_only</code>、<code>short_only</code>、<code>both</code> 或 <code>neutral</code> |
+| <code>position_side</code> | 仓位/订单 | 合约 hedge mode 中的 <code>long</code> 或 <code>short</code> 分腿；现货只有 long 库存 |
+| 订单 value/target | 策略源码 | 希望增减或达到的数量、价值、权重；做空目标在源码中使用负数 |
+| <code>open/add/reduce/close</code> | 运行时订单意图 | 引擎根据当前同步仓位和目标差额生成的标准动作，提交数量使用绝对值 |
+| <code>execution_mode</code> | 部署 | <code>signal</code> 只发信号，<code>live</code> 才提交真实订单 |
+| <code>coexistence_mode</code> | 账户仓位归属 | <code>strict</code> 或 <code>advanced</code>，决定用户仓位怎样与策略仓位共存；它不是交易方向 |
+
 订单函数：
 
 | 函数 | 含义 |
@@ -473,7 +491,9 @@ def monitor_entry(cancel_requested):
         cancel_order(g.entry_ref)
 ~~~
 
-未显式传 <code>client_order_id</code> 时，订单函数为了兼容旧代码仍返回 <code>None</code>；传入后会返回该 ID，用于状态跟踪。常见状态包括 <code>unknown</code>、<code>queued</code>、<code>deferred</code>、<code>submitted</code>、<code>open</code>、<code>partial</code>、<code>filled</code>、<code>cancelled</code> 和 <code>rejected</code>。实盘撤单是异步过程，必须等待对账后的终态才能复用资金或推进状态。<code>consume_last_exit_reason(symbol)</code> 会返回并清除最近一次保护离场原因。
+新策略中，所有需要重试、取消、对账或推进运行周期的订单都必须显式传入稳定的 <code>client_order_id</code>。订单函数会返回该 ID，供 <code>get_order_status</code> 查询。旧源码未传 ID 时仍可能返回 <code>None</code>，但这只是迁移行为，不是新策略契约。
+
+常见活动状态包括 <code>unknown</code>、<code>queued</code>、<code>deferred</code>、<code>submitted</code>、<code>open</code> 和 <code>partial</code>；终态包括 <code>filled</code>、<code>rejected</code>、<code>failed</code>、<code>cancelled</code>/<code>canceled</code> 和 <code>expired</code>。<code>partial</code> 不是完全成交，不能按计划数量推进状态。订单终态和交易所仓位同步可能短暂错开，因此复用资金、开始新周期或反向开仓前，必须同时确认订单终态和同步仓位。实盘撤单也是异步过程。<code>consume_last_exit_reason(symbol)</code> 会返回并清除最近一次保护离场原因。
 
 现货和所有非 Crypto 市场当前按 long-only 编写。多头离场条件与空头入场条件必须独立；不要把 <code>target=0</code> 的离场自动改成负仓位。
 
@@ -552,7 +572,7 @@ context.set_metadata(direction_mode="both")
 
 支持 `long_only`（仅做多）、`short_only`（仅做空）、`both`（多空双向）和 `neutral`（中性双腿）。这个声明不会下单，也不会覆盖策略信号；它用于在部署时分配正确的双向持仓腿，并拒绝超出声明能力的新开仓信号。`both` 和 `neutral` 在实盘中要求交易所账户开启双向持仓模式。
 
-编译器仍会兼容识别旧策略顶层的 `DIRECTION = 1/-1` 常量，以及订单中的字面量 `position_side="long"/"short"`。如果无法安全推断旧版合约策略，部署页面才会要求选择兼容模式。现货策略会自动视为 `long_only`。
+新建 Crypto swap 策略必须显式声明 <code>direction_mode</code>，并在每次合约仓位读取和订单调用中显式传入 <code>position_side</code>。编译器对旧源码中 <code>DIRECTION = 1/-1</code> 或字面量仓位腿的推断只用于迁移，不属于推荐契约，也不应作为新模板的实现方式。现货策略按 <code>long_only</code> 编写。
 
 ### 双向持仓示例
 
@@ -807,9 +827,22 @@ def rebalance(context, data):
 ### 仓位归属、对账与账户风控
 
 - 实盘策略只能管理分配给自己的策略仓位。用户手工持仓和其他策略拥有的仓位不能被该策略平掉。
-- 平仓或反手前，运行时会核对策略分配、数据库状态和交易所仓位快照。发现不一致时会阻止订单，避免误平用户无关仓位。
+- Crypto 现货和合约都支持高级共存。归属基线按账户凭证、市场类型、规范标的和持仓腿分别记录；现货只有 long 库存，合约按 long/short 分腿。
+- 核对恒等式是：<code>账户仓位 = 策略分配仓位 + 用户保护仓位 + 未知差额</code>。允许继续开仓要求未知差额处于容差范围内。
+
+| 归属模式 | 用户保护仓位 | 行为 |
+| --- | --- | --- |
+| <code>strict</code>（默认） | 固定为 0 | 账户出现未分配仓位时暂停该方向开仓/加仓，不会自动平仓 |
+| <code>advanced</code> | 用户确认时记录 <code>账户仓位 - 策略仓位</code> | 策略可以与该保护基线共存；后续产生新的未知差额时仍暂停开仓/加仓 |
+
+- 漂移只暂停同方向的新开仓和加仓，并在状态首次变化时记录一次包含账户、策略、保护和未知数量的日志；相同状态不会反复刷日志。
+- 网格策略会在每次挂单同步时执行同一归属核对。发生漂移会撤销该持仓腿尚未成交的 entry 挂单；账户低于保护分配或无法确认保护账本时，也会撤销可能超量的 exit 挂单，再按策略仓位、已有退出挂单和保护基线重新计算安全退出数量。
+- 平仓和减仓保持可用，但数量同时受策略账本、交易所实际仓位和用户保护基线约束，绝不会越过保护仓位。平仓不是修复未知差额的工具。
+- “持仓归属与修复”页面提供：<code>protect_manual</code>（把当前差额设为用户保护基线并启用高级共存）、<code>strict_mode</code>（清除基线并恢复严格模式）和 <code>recheck</code>（重新拉取并核对）。这些动作只修改归属记录，不会自动开仓或平仓。
+- 高级共存是 QuantDinger 的账本隔离，不是交易所物理隔离。现货同币种仍共享账户余额；合约同方向仓位仍共享交易所均价、保证金和强平风险。
 - 同账户/交易所/市场/标的/持仓腿采用独占归属。确认 hedge mode 后，可以由两个 long-only、short-only 策略分别使用相反腿；<code>both</code>/<code>neutral</code> 会占用两条腿。
 - 策略计算后还会应用最小数量、数量步长、最小名义金额、可用保证金、杠杆和交易所上限，最终提交数量可能与原始请求不同。
+- 只有合约开仓/加仓会设置保证金模式和杠杆；平仓/减仓跳过账户配置，避免配置接口故障阻塞退出。Binance 返回 HTTP 408、<code>-1007</code> 或“execution status unknown”时，运行时会回读保证金模式/杠杆；只有回读与目标一致才继续开仓。
 - 可选账户风控会按总名义敞口、预计保证金、总杠杆或单标的敞口拒绝订单。这类结果是需要调整配置或仓位的风控警告，不能绕过保护。
 - 行情、私有 WebSocket 事件与定期 REST 对账共同工作。WebSocket 提供低延迟，REST 仍是断线或漏事件后的恢复来源。
 
@@ -842,16 +875,33 @@ def rebalance(context, data):
 | <code>strategyV2.dualDirectionHedgeModeRequired:...</code> | 账户没有开启双向持仓 | 在交易所开启 hedge/双向持仓模式 |
 | <code>strategyV2.hedgeModeUnknown:...</code> | 无法确认账户持仓模式 | 修复凭证/API 权限后重试 |
 | <code>strategyV2.liveLegConflict:...</code> | 另一实盘策略已占用该腿 | 停止或调整冲突策略 |
-| 仓位/账户不一致 | 策略分配仓位与交易所不同 | 对账或停机修复，不能绕过 |
+| <code>position_drift_detected:...</code> | 账户、策略和保护基线存在未知差额 | 在“持仓归属与修复”中重新核对、保护用户仓位或恢复严格模式；不要绕过 |
+| <code>unallocated_account_position</code> | 账户仓位高于策略仓位与保护基线之和 | 核对后将差额登记为用户保护仓位，或手工恢复一致 |
+| <code>account_below_protected_allocation</code> | 账户仓位低于策略仓位与保护基线之和 | 停止新增订单并核对交易所、策略账本和保护基线 |
 | 数量无效/低于最小名义金额 | 取整后无法提交 | 增加资金/权重或更换合适标的 |
 | 账户风控拒绝 | 超出账户配置的敞口上限 | 降低仓位/杠杆，或有意调整限制 |
 | <code>strategyV2.runtimeFailed:...</code> | 回调运行异常 | 根据处理器名和原始异常修复 |
 
 ---
 
-## 20. 可视化机器人模板
+## 20. 系统预设与可视化机器人模板
+
+### 系统预设策略模板
+
+系统预设目录当前使用 <code>system_seed version=11</code>，包含 8 个 CTA 模板（单均线、双均线、阳线穿三线、趋势过滤阳线穿三线、海龟、指标共振、MACD/KDJ、SuperTrend）和 4 个组合模板（市值杠铃、动量 Top N、低波动、质量成长）。预设模板既是示例，也是当前 Strategy API V2 推荐契约的可执行基线。
+
+系统预设必须满足：
+
+- 每个模板显式声明 <code>direction_mode</code>；Crypto swap 模板显式读取和操作 <code>position_side</code> 分腿。
+- 双向趋势模板执行“先平反向腿，等待成交与仓位同步，再开目标腿”，不能用一个净仓位变量代替两条腿。
+- 可从交易所仓位恢复的状态应以同步后的 <code>amount</code>、<code>avg_cost</code> 和订单状态为准；无法可靠重建的状态必须启用 <code>PERSIST_RUNTIME_STATE</code>。
+- 每次目录更新都必须通过参数契约、编译、方向能力和合成回测测试。复制模板后如果修改了市场、方向或周期，应重新验证 manifest，而不是继续依赖模板身份。
+
+### 可视化机器人模板
 
 机器人模板会生成可编辑的 Strategy API V2 源码。真正可部署的契约是生成后的源码，不是右侧预览；每次手工修改后都必须重新验证。
+
+当前生成源码的契约版本为：网格 <code>GRID_TEMPLATE_VERSION = 6</code>、DCA <code>DCA_TEMPLATE_VERSION = 6</code>、马丁与分仓马丁 <code>ROBOT_TEMPLATE_VERSION = 6</code>。版本常量用于诊断生成源码，不能代替 manifest 和运行前验证。
 
 | 模板 | 触发与资金分配 | 当前边界 |
 | --- | --- | --- |
@@ -871,6 +921,9 @@ DCA 规则：
 
 - 定投间隔按实际经过的分钟数计算，不是“K 线根数”。处理器只能在订阅 bar 到达时执行，因此间隔小于源码周期时，实际会在下一根可用 bar 执行。
 - 每次投入同时受单次比例和周期总预算限制。即使启用了价格过滤、止盈、硬止损或追踪保护，也仍需设置最大定投次数。
+- 提交定投后先进入 pending。只有 <code>get_order_status</code> 返回 <code>filled</code>，才按实际成交额和手续费扣减周期预算并增加定投次数；调用 <code>order_value</code> 本身不代表成交。
+- <code>partial</code> 必须继续等待对账，不能按完全成交处理。<code>rejected</code>、<code>failed</code>、<code>cancelled/canceled</code> 或 <code>expired</code> 应释放挂起状态，不消耗次数和成交预算，并使用新的稳定客户端引用重试。
+- DCA 生成源码开启 <code>PERSIST_RUNTIME_STATE</code>。退出后只有在账户仓位确认归零且存在明确离场原因时才能重置周期；不能因为仓位同步暂时落后就重复开始新周期。
 
 马丁规则：
 
@@ -890,8 +943,10 @@ DCA 规则：
 - [ ] 参数默认值与代码回退值一致。
 - [ ] 所有历史窗口都检查长度。
 - [ ] 不使用未来行、负 shift 或居中 rolling。
+- [ ] 指标和入场/加仓信号只读取已完成 K 线；实时价格没有覆盖最后一根 OHLC，且只用于保护与权益风控。
 - [ ] 多头离场与空头入场独立。
 - [ ] 双向持仓代码显式读取和操作 <code>position_side</code> 分腿。
+- [ ] 已区分 <code>direction_mode</code>、<code>position_side</code>、<code>execution_mode</code> 与账户 <code>coexistence_mode</code>。
 - [ ] 仓位有明确上限；网格、DCA、马丁和加仓层数有硬限制。
 - [ ] 订单都有可审计 reason。
 - [ ] 可重试/活动订单使用稳定客户端 ID，并且确认前不推进状态。
@@ -904,3 +959,4 @@ DCA 规则：
 - [ ] 已用不同时间区间和成本假设做稳健性测试。
 - [ ] 已有至少一次成功回测后再发布。
 - [ ] live 前先确认凭证、市场、余额、最小交易单位和通知。
+- [ ] 复用已有现货或合约仓位时，已在持仓修复页面确认严格/高级共存模式及用户保护基线。

@@ -278,6 +278,13 @@ This implements “confirm on close, fill at next open” without future leakage
 
 Live sessions process each closed bar once and preserve <code>g</code> state while the session remains alive. Receiving the same bar twice should not duplicate strategy work. Cross-restart state is opt-in as described in Section 9.
 
+### Closed bars versus real-time prices
+
+- The final row exposed by <code>get_history</code>, <code>data.current</code>, <code>data.history</code>, and indicator functions must be a completed bar. A real-time trade or mark price must not rewrite, overwrite, or extend that bar's OHLC.
+- Moving averages, breakouts, patterns, factors, and all other entry or scale-in signals must use completed bars so backtests, live runs, and restart replay share the same semantics.
+- Real-time prices are reserved for stop loss, take profit, trailing protection, and equity risk. They must not make an unfinished candle look complete or revise a confirmed strategy signal.
+- A future tick-driven strategy product needs a separate API, replay model, and contract. Do not simulate it inside ordinary Strategy API V2 source.
+
 ---
 
 ## 9. context, data, and g
@@ -416,6 +423,17 @@ short_position = get_position(g.symbol, position_side="short")
 
 Do not treat <code>get_position(symbol)</code> as a synthetic net position in hedge mode. <code>get_positions()</code> may contain leg-aware keys such as <code>symbol::long</code> and <code>symbol::short</code>. Use <code>abs(position.amount)</code> when checking whether a leg is open.
 
+Do not confuse these definitions from different layers:
+
+| Name | Layer | Meaning |
+| --- | --- | --- |
+| <code>direction_mode</code> | strategy manifest | allowed capability: <code>long_only</code>, <code>short_only</code>, <code>both</code>, or <code>neutral</code> |
+| <code>position_side</code> | position/order | <code>long</code> or <code>short</code> leg in swap hedge mode; spot has long inventory only |
+| order value/target | strategy source | requested quantity, value, or weight change/target; short targets are negative in source |
+| <code>open/add/reduce/close</code> | runtime order intent | canonical action derived from synchronized position and target delta; submitted quantity is absolute |
+| <code>execution_mode</code> | deployment | <code>signal</code> emits signals, while <code>live</code> submits real orders |
+| <code>coexistence_mode</code> | account ownership | <code>strict</code> or <code>advanced</code> manual/strategy inventory policy; it is not trade direction |
+
 Order functions:
 
 | Function | Meaning |
@@ -471,7 +489,9 @@ def monitor_entry(cancel_requested):
         cancel_order(g.entry_ref)
 ~~~
 
-Order helpers preserve their historical <code>None</code> return when no explicit <code>client_order_id</code> is supplied. With an explicit ID they return that ID for status tracking. Typical status values include <code>unknown</code>, <code>queued</code>, <code>deferred</code>, <code>submitted</code>, <code>open</code>, <code>partial</code>, <code>filled</code>, <code>cancelled</code>, and <code>rejected</code>. Cancellation is asynchronous in live trading; wait for the reconciled terminal status before reusing capital or advancing state. <code>consume_last_exit_reason(symbol)</code> returns and clears the most recently recorded protection exit reason.
+In new strategies, every order that may be retried, cancelled, reconciled, or used to advance a cycle must supply a stable <code>client_order_id</code>. The order helper returns that ID for <code>get_order_status</code>. Legacy source without an explicit ID may still receive <code>None</code>, but that is migration behavior rather than the new-strategy contract.
+
+Typical working states are <code>unknown</code>, <code>queued</code>, <code>deferred</code>, <code>submitted</code>, <code>open</code>, and <code>partial</code>. Terminal states include <code>filled</code>, <code>rejected</code>, <code>failed</code>, <code>cancelled</code>/<code>canceled</code>, and <code>expired</code>. <code>partial</code> is not a full fill and must not advance state by the planned quantity. A terminal order status and synchronized exchange position can become visible at slightly different times; confirm both before reusing capital, beginning a new cycle, or opening the opposite leg. Live cancellation is also asynchronous. <code>consume_last_exit_reason(symbol)</code> returns and clears the most recently recorded protection exit reason.
 
 Write spot and all non-Crypto markets as long-only under the current product policy. A long exit and a short entry are independent; do not turn a zero target into a negative position automatically.
 
@@ -550,7 +570,7 @@ context.set_metadata(direction_mode="both")
 
 Supported values are `long_only`, `short_only`, `both`, and `neutral`. This declaration does not place orders or override strategy signals. It lets deployment validation reserve the correct hedge-mode leg or legs and reject new entry signals that exceed the declared capability. `both` and `neutral` require hedge mode for live execution.
 
-The compiler still recognizes legacy top-level `DIRECTION = 1/-1` constants and literal `position_side="long"/"short"` order arguments. If a legacy swap strategy cannot be inferred safely, the deployment form asks for a compatibility mode. Spot strategies are treated as `long_only` automatically.
+Every new Crypto swap strategy must declare <code>direction_mode</code> and pass an explicit <code>position_side</code> on each contract-position read and order call. Compiler inference from legacy <code>DIRECTION = 1/-1</code> constants or literal legs exists only for migration; it is not the recommended contract and must not be used by new templates. Write spot strategies as <code>long_only</code>.
 
 ### Hedge-mode example
 
@@ -805,9 +825,22 @@ Mixed-market live deployment is unsupported. Other markets cannot be forced thro
 ### Position ownership, reconciliation, and account risk
 
 - A live strategy owns only its allocated strategy position. Manual holdings and positions owned by another strategy are not available for it to close.
-- Before placing a close or reversal, the runtime reconciles strategy allocation, database state, and the exchange snapshot. A mismatch blocks the order rather than risking a user's unrelated holding.
+- Advanced coexistence supports both Crypto spot and derivatives. Baselines are keyed by credential, market type, canonical symbol, and position leg; spot has long inventory only, while derivatives use long/short legs.
+- The reconciliation identity is <code>account position = strategy allocation + protected manual position + unknown delta</code>. New entries require the unknown delta to remain within tolerance.
+
+| Ownership mode | Protected manual position | Behavior |
+| --- | --- | --- |
+| <code>strict</code> (default) | always 0 | unallocated account inventory pauses same-side entries/adds; it never auto-closes a position |
+| <code>advanced</code> | records <code>account position - strategy position</code> after explicit confirmation | strategy inventory may coexist with that floor; any later unknown delta pauses entries/adds again |
+
+- Drift pauses same-side opens/adds only. The first state transition logs account, strategy, protected, and unknown quantities; an unchanged blocked state does not spam duplicate logs.
+- Grid strategies run the same ownership check on every resting-order sync. Drift cancels unfilled entry orders on that leg. If the account is below its protected allocation or the protection ledger cannot be verified, potentially oversized exits are also cancelled and rebuilt from strategy inventory, existing exits, and the protected floor.
+- Closes/reductions remain available but are capped by the strategy ledger, actual exchange inventory, and protected baseline. They can never cross protected manual inventory, and are not a tool for absorbing an unknown delta.
+- The Ownership & Repair page exposes <code>protect_manual</code> (record the current delta and enable advanced mode), <code>strict_mode</code> (clear the floor and return to strict mode), and <code>recheck</code> (refresh and reconcile). These actions update ownership records only and never trade automatically.
+- Advanced coexistence is QuantDinger ledger isolation, not physical venue isolation. Spot inventory still shares the account balance; same-side derivatives still share venue entry price, margin, and liquidation risk.
 - Same account/exchange/market/symbol/leg ownership is exclusive. Confirmed hedge mode can allow separate long-only and short-only strategies on opposite legs; <code>both</code>/<code>neutral</code> reserves both.
 - Minimum quantity, quantity step, minimum notional, available margin, leverage, and venue caps are applied after strategy sizing. The final submitted quantity can differ from the raw request.
+- Only derivative opens/adds configure margin mode and leverage. Closes/reductions skip account configuration so a configuration endpoint failure cannot block an exit. After Binance HTTP 408, <code>-1007</code>, or “execution status unknown,” the runtime reads configuration back and proceeds only when observed margin mode/leverage matches the target.
 - Optional account-risk limits can reject orders for gross notional, estimated margin, gross leverage, or per-symbol notional. Treat those as risk warnings that require configuration or sizing changes, not as reasons to bypass the guard.
 - Market data, private WebSocket events, and periodic REST reconciliation work together. WebSocket improves latency; REST remains the recovery source after disconnects or missed events.
 
@@ -838,16 +871,33 @@ Allowed import roots are <code>numpy</code>, <code>pandas</code>, <code>math</co
 | <code>strategyV2.dualDirectionHedgeModeRequired:...</code> | account is not in hedge mode | enable venue hedge/dual-side mode |
 | <code>strategyV2.hedgeModeUnknown:...</code> | account mode could not be confirmed | repair credential/API access and retry |
 | <code>strategyV2.liveLegConflict:...</code> | another live strategy owns the leg | stop/reconfigure the conflicting strategy |
-| position/account mismatch | strategy allocation differs from venue | reconcile or stop-and-repair; do not bypass |
+| <code>position_drift_detected:...</code> | account, strategy, and protected baseline contain an unknown delta | recheck, protect manual inventory, or restore strict mode in Ownership & Repair; do not bypass |
+| <code>unallocated_account_position</code> | account position exceeds strategy plus protected inventory | verify and protect the delta as manual inventory, or restore equality manually |
+| <code>account_below_protected_allocation</code> | account position is below strategy plus protected inventory | stop new entries and reconcile venue, strategy ledger, and baseline |
 | invalid amount/minimum notional | rounded quantity cannot be submitted | increase capital/weight or choose a suitable instrument |
 | account-risk rejection | configured account exposure limit exceeded | reduce size/leverage or deliberately revise the limit |
 | <code>strategyV2.runtimeFailed:...</code> | handler raised | inspect the named handler and cause |
 
 ---
 
-## 20. Visual robot templates
+## 20. System presets and visual robot templates
+
+### System preset strategy templates
+
+The system preset catalog currently uses <code>system_seed version=11</code>. It contains eight CTA templates (single MA, dual MA, bullish candle through three averages, trend-filtered bullish candle, Turtle, indicator resonance, MACD/KDJ, and SuperTrend) and four portfolio templates (market-cap barbell, momentum Top N, low volatility, and quality growth). Presets are examples and the executable baseline for the current recommended Strategy API V2 contract.
+
+Every system preset must satisfy these rules:
+
+- Declare <code>direction_mode</code> explicitly; Crypto swap templates read and write explicit <code>position_side</code> legs.
+- A bidirectional trend template closes the opposite leg, waits for fill and position synchronization, and only then opens the target leg. It must not replace two hedge legs with one net-position variable.
+- Reconstructible state comes from synchronized <code>amount</code>, <code>avg_cost</code>, and order status. State that cannot be rebuilt reliably must enable <code>PERSIST_RUNTIME_STATE</code>.
+- Every catalog revision must pass parameter-contract, compilation, direction-capability, and synthetic-backtest tests. After copying a preset, revalidate the manifest whenever market, direction, or frequency changes.
+
+### Visual robot templates
 
 Robot templates generate editable Strategy API V2 source. The generated source—not the preview alone—is the deployable contract. Verify it after every manual edit.
+
+Current generated-source contract revisions are <code>GRID_TEMPLATE_VERSION = 6</code> for grid, <code>DCA_TEMPLATE_VERSION = 6</code> for DCA, and <code>ROBOT_TEMPLATE_VERSION = 6</code> for martingale and layered martingale. These constants help diagnose generated source; they do not replace manifest or preflight validation.
 
 | Template | Trigger and sizing | Current boundary |
 | --- | --- | --- |
@@ -867,6 +917,9 @@ DCA rules:
 
 - The interval is measured in elapsed minutes, not “number of K-lines.” The handler can only act when a subscribed bar is processed, so an interval shorter than the source timeframe becomes effective on the next available bar.
 - Each purchase is capped by both per-order percentage and total cycle budget. Optional price filters, take-profit, hard stop, and trailing protection do not remove the need for a maximum order count.
+- A submitted purchase first becomes pending. Only a <code>filled</code> result from <code>get_order_status</code> increments the order count and charges actual filled notional plus fees to cycle spend; calling <code>order_value</code> does not imply a fill.
+- <code>partial</code> remains pending and must not be treated as fully filled. <code>rejected</code>, <code>failed</code>, <code>cancelled/canceled</code>, or <code>expired</code> releases pending state without consuming count or filled budget, and a retry uses a new stable client reference.
+- Generated DCA source enables <code>PERSIST_RUNTIME_STATE</code>. After an exit, reset the cycle only when the account position is confirmed flat and an explicit exit reason exists; a short position-sync delay must not start a duplicate cycle.
 
 Martingale rules:
 
@@ -886,8 +939,10 @@ Martingale rules:
 - [ ] Parameter defaults and code fallbacks agree.
 - [ ] Every history window checks actual length.
 - [ ] No future rows, negative shifts, or centered rolling.
+- [ ] Indicators and entry/scale-in signals use completed bars only; real-time prices do not overwrite the last OHLC and are limited to protection and equity risk.
 - [ ] Long exits and short entries are independent.
 - [ ] Hedge-mode code reads and writes explicit <code>position_side</code> legs.
+- [ ] <code>direction_mode</code>, <code>position_side</code>, <code>execution_mode</code>, and account <code>coexistence_mode</code> are not conflated.
 - [ ] Exposure is capped; grid, DCA, martingale, and scaling layers have hard limits.
 - [ ] Every order has an auditable reason.
 - [ ] Retryable/working orders use stable client IDs and do not advance state before confirmation.
@@ -900,3 +955,4 @@ Martingale rules:
 - [ ] Robustness is tested across periods and cost assumptions.
 - [ ] At least one successful backtest exists before publication.
 - [ ] Credentials, market, balance, lot size, and notifications are checked before live use.
+- [ ] Reusing existing spot or derivative inventory includes an explicit strict/advanced ownership choice and verified protected baseline.

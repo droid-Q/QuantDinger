@@ -1,5 +1,6 @@
 import pytest
 import pandas as pd
+from types import SimpleNamespace
 
 from app.services.strategy_runtime.executors import (
     build_executor_strategy_payload,
@@ -64,6 +65,10 @@ def test_executor_templates_expose_only_supported_robot_types():
         assert defaults["dynamic_anchor"] is True
         assert "initial_capital" not in defaults
         assert "leverage" not in defaults
+        assert defaults["equity_take_profit_pct"] == pytest.approx(0.10)
+        assert defaults["equity_stop_loss_pct"] == pytest.approx(0.06)
+        assert defaults["equity_trailing_enabled"] is True
+        assert 0 < defaults["equity_trailing_callback_pct"] < defaults["equity_trailing_activation_pct"]
         if item["executor_type"] in {"dca", "martingale", "layered_martingale"}:
             assert defaults["trailing_take_profit_enabled"] is True
             assert 0 < defaults["trailing_callback_pct"] < defaults["trailing_activation_pct"]
@@ -93,6 +98,103 @@ def test_every_robot_generates_a_compilable_strategy_v2_source(executor_type):
         assert program.manifest.max_leverage == 100
         assert program.manifest.universe.instruments[0].key == "Crypto:BTC/USDT@swap"
     assert payload["compatibility"]["strategy"]["editable_source"] is True
+    assert payload["metadata"]["equity_risk"]["basis"] == "starting_equity"
+    trigger = payload["metadata"]["trigger_contract"]
+    if executor_type == "grid":
+        assert trigger["entry"] == "exchange_resting_orders"
+    elif executor_type == "dca":
+        assert trigger["entry"] == "schedule"
+    else:
+        assert trigger["entry"] == "realtime_price"
+        assert trigger["signal_confirmation"] == "price_tick"
+    assert payload["metadata"]["equity_risk"]["trailing_enabled"] is True
+    assert "PERSIST_RUNTIME_STATE = True" in payload["code"]
+    assert payload["trading_config"]["equity_trailing_enabled"] is True
+
+
+@pytest.mark.parametrize("executor_type", ["grid", "dca", "martingale", "layered_martingale"])
+def test_every_robot_uses_total_equity_take_profit_stop_and_trailing(executor_type):
+    payload = build_executor_strategy_payload(
+        _robot_payload(
+            executor_type,
+            equity_take_profit_pct=0.20,
+            equity_stop_loss_pct=0.10,
+            equity_trailing_enabled=True,
+            equity_trailing_activation_pct=0.04,
+            equity_trailing_callback_pct=0.02,
+        ),
+        user_id=7,
+    )
+    config = payload["trading_config"]["executor_config"]
+    assert config["equity_take_profit_pct"] == pytest.approx(0.20)
+    assert config["equity_stop_loss_pct"] == pytest.approx(0.10)
+    assert config["equity_trailing_enabled"] is True
+    assert "current_equity = float(context.portfolio.total_value or 0.0)" in payload["code"]
+
+    namespace = {}
+    exec(payload["code"], namespace)
+    namespace["g"] = SimpleNamespace(
+        equity_peak_return=0.0,
+        equity_trailing_armed=False,
+    )
+    context = SimpleNamespace(portfolio=SimpleNamespace(starting_cash=1000.0, total_value=1050.0))
+    assert namespace["_equity_risk_reason"](context) == ""
+    assert namespace["g"].equity_trailing_armed is True
+    context.portfolio.total_value = 1029.0
+    assert namespace["_equity_risk_reason"](context) == "equity_trailing_stop"
+
+
+def test_robot_preview_warns_when_total_equity_trailing_is_invalid():
+    preview = preview_executor(_robot_payload(
+        "grid",
+        equity_trailing_enabled=True,
+        equity_trailing_activation_pct=0.02,
+        equity_trailing_callback_pct=0.03,
+    ))
+
+    assert "invalid_equity_trailing_take_profit" in preview["warnings"]
+
+
+def test_robot_build_rejects_invalid_risk_and_capital_instead_of_silently_saving():
+    with pytest.raises(ValueError, match="invalid_equity_trailing_take_profit"):
+        build_executor_strategy_payload(_robot_payload(
+            "grid",
+            equity_trailing_enabled=True,
+            equity_trailing_activation_pct=0.02,
+            equity_trailing_callback_pct=0.03,
+        ), user_id=7)
+
+    with pytest.raises(ValueError, match="INITIAL_CAPITAL_OUT_OF_RANGE"):
+        build_executor_strategy_payload(
+            _robot_payload("dca", initial_capital=5),
+            user_id=7,
+        )
+
+
+@pytest.mark.parametrize("executor_type", ["grid", "dca", "martingale", "layered_martingale"])
+def test_system_robot_equity_risk_can_run_between_bars_and_rearm_after_rejection(executor_type):
+    payload = build_executor_strategy_payload(
+        _robot_payload(executor_type, equity_stop_loss_pct=0.10),
+        user_id=7,
+    )
+    frame = _runtime_frame()
+    instrument = next(iter(compile_strategy_v2(payload["code"]).manifest.universe.instruments)).key
+    session = StrategyV2LiveSession(
+        code=payload["code"],
+        frames={instrument: frame},
+        initial_capital=1000,
+    )
+    session.portfolio.total_value = 850
+
+    _orders, _messages, reason = session.evaluate_equity_risk(
+        timestamp=frame.index[-1],
+    )
+
+    assert reason.endswith("equity_stop_loss")
+    assert session.program.state.equity_exit_pending is True
+    session.release_equity_risk_exit()
+    assert session.program.state.equity_exit_pending is False
+    assert session.program.state.equity_stop_reason == ""
 
 
 def _runtime_frame():
@@ -173,7 +275,13 @@ def test_robot_trailing_take_profit_activates_and_closes_after_pullback(executor
     assert intents[0].protection.trailing_stop_pct == pytest.approx(0.003)
 
     session.synchronize_positions({
-        instrument: {"side": "long", "amount": 1, "avg_cost": 100, "last_price": 100}
+        instrument: {
+            "side": "long",
+            "position_side": "" if executor_type == "dca" else "long",
+            "amount": 1,
+            "avg_cost": 100,
+            "last_price": 100,
+        }
     })
     assert session.evaluate_protections(
         {instrument: 102},
@@ -186,7 +294,13 @@ def test_robot_trailing_take_profit_activates_and_closes_after_pullback(executor
     )
     restored.restore_protection_snapshot(session.protection_snapshot())
     restored.synchronize_positions({
-        instrument: {"side": "long", "amount": 1, "avg_cost": 100, "last_price": 102}
+        instrument: {
+            "side": "long",
+            "position_side": "" if executor_type == "dca" else "long",
+            "amount": 1,
+            "avg_cost": 100,
+            "last_price": 102,
+        }
     })
     exits = restored.evaluate_protections(
         {instrument: 101.5},
@@ -376,13 +490,16 @@ def test_martingale_generated_source_uses_confirmed_batched_incremental_orders()
     )
     source = payload["code"]
 
-    assert "ROBOT_TEMPLATE_VERSION = 3" in source
+    assert "ROBOT_TEMPLATE_VERSION = 6" in source
+    assert "ENTRY_TRIGGER_MODE = 'realtime_price'" in source
+    assert "def on_price_tick(context, prices):" in source
     assert "PERSIST_RUNTIME_STATE = True" in source
     assert "RESTART_AFTER_STOP = True" in source
     assert "get_order_status(reference)" in source
     assert 'g.level_statuses = ["ready" for _ in PRICE_LEVELS]' in source
     assert "def _submit_levels(context, indexes):" in source
     assert "order_value(" in source
+    assert "position_side=POSITION_SIDE" in source
     assert "trailing_rebase_on_scale_in=False" in source
     assert "order_target_value(\n        INSTRUMENT,\n        DIRECTION * quote_total" not in source
     assert 'get_history(2, TIMEFRAME, ["high", "low", "close"], INSTRUMENT)' in source
@@ -391,9 +508,72 @@ def test_martingale_generated_source_uses_confirmed_batched_incremental_orders()
         _robot_payload("grid"),
         user_id=7,
     )
-    assert "GRID_TEMPLATE_VERSION = 4" in grid["code"]
+    assert "GRID_TEMPLATE_VERSION = 6" in grid["code"]
     assert "g.cell_states" in grid["code"]
     assert 'reason=side + "_exit"' in grid["code"]
+
+
+def test_martingale_live_price_tick_triggers_levels_without_waiting_for_a_new_bar():
+    payload = build_executor_strategy_payload(
+        _robot_payload(
+            "martingale",
+            market_type="spot",
+            leverage=1,
+            initial_capital=100,
+            entry_price=100,
+            base_order_size=1,
+            safety_order_size=2,
+            max_layers=4,
+            price_deviation_pct=0.04,
+            step_multiplier=1.2,
+            volume_multiplier=2,
+            hard_stop_pct=0,
+        ),
+        user_id=7,
+    )
+    instrument = "Crypto:BTC/USDT@spot"
+    frame = _runtime_frame().iloc[:2]
+    session = StrategyV2LiveSession(
+        code=payload["code"],
+        frames={instrument: frame},
+        initial_capital=100,
+        params={"commission": 0.001, "execution_mode": "live"},
+    )
+
+    initial, _ = session.evaluate_price_tick(
+        {instrument: 100},
+        timestamp="2026-01-01T00:00:01Z",
+    )
+    assert len(initial) == 1
+    assert initial[0].reason == "robot_level"
+    reference = initial[0].client_order_id
+    session.context.update_order_statuses({
+        reference: {
+            "client_order_id": reference,
+            "status": "filled",
+            "filled_notional": abs(initial[0].value),
+            "fee": 0,
+        }
+    })
+    session.synchronize_positions({
+        instrument: {
+            "side": "long",
+            "amount": 0.01,
+            "avg_cost": 100,
+            "last_price": 100,
+        }
+    })
+
+    scale_ins, _ = session.evaluate_price_tick(
+        {instrument: 90},
+        timestamp="2026-01-01T00:00:02Z",
+    )
+    assert len(scale_ins) == 1
+    assert scale_ins[0].reason == "robot_level"
+    assert scale_ins[0].client_order_id != reference
+
+    bar_orders, _, _ = session.process({instrument: frame})
+    assert bar_orders == []
 
 
 def test_martingale_crosses_multiple_levels_as_one_batch_and_spends_full_budget_with_fees():
@@ -584,6 +764,7 @@ def test_martingale_stop_loss_reentry_toggle_waits_for_flat_and_one_new_bar(
     session.synchronize_positions({
         instrument: {
             "side": "long",
+            "position_side": "long",
             "amount": 1,
             "avg_cost": 100,
             "last_price": 100,
@@ -634,6 +815,35 @@ def test_neutral_grid_preview_is_symmetric_and_uses_adjacent_cell_exits():
     assert all(row["take_profit_price"] < row["price"] for row in short_rows)
 
 
+def test_dense_grid_preview_warns_and_generated_source_caps_unused_entry_slots():
+    request = _robot_payload(
+        "grid",
+        side="long",
+        grid_count=80,
+        start_price=0.8,
+        end_price=1.2,
+        max_open_orders=50,
+        dynamic_anchor=True,
+    )
+
+    preview = preview_executor(request)
+    payload = build_executor_strategy_payload(request, user_id=7)
+
+    assert "high_frequency_grid_backtest_workload" in preview["warnings"]
+    assert preview["config"]["grid_count"] == 80
+    assert "MAX_OPEN_ENTRY_ORDERS = 40" in payload["code"]
+
+
+def test_grid_preview_rejects_pathological_cell_count_instead_of_silent_truncation():
+    with pytest.raises(ValueError, match="GRID_COUNT_EXCEEDS_SAFE_LIMIT"):
+        preview_executor(_robot_payload(
+            "grid",
+            grid_count=201,
+            start_price=0.8,
+            end_price=1.2,
+        ))
+
+
 def test_dca_catalog_and_source_use_a_time_based_fixed_allocation_plan():
     defaults = next(
         item["defaults"] for item in executor_templates()["items"]
@@ -665,7 +875,12 @@ def test_dca_catalog_and_source_use_a_time_based_fixed_allocation_plan():
     assert "Crypto:BTC/USDT@spot" in payload["code"]
     assert "allow_leverage" not in payload["code"]
     assert 'reason="dca_scheduled_order"' in payload["code"]
-    assert "g.dca_spent_value += purchase_value" in payload["code"]
+    assert "DCA_TEMPLATE_VERSION = 6" in payload["code"]
+    assert "get_order_status(reference)" in payload["code"]
+    assert "g.dca_pending_ref = order_value(" in payload["code"]
+    assert "client_order_id=reference" in payload["code"]
+    assert "g.dca_spent_value += purchase_value" not in payload["code"]
+    assert payload["code"].index('if name == "filled":') < payload["code"].index("g.dca_order_count += 1")
     assert "order_value(" in payload["code"]
     assert "PRICE_LEVELS" not in payload["code"]
     assert 'reason="robot_level"' not in payload["code"]
@@ -710,6 +925,58 @@ def test_dca_backtest_places_equal_orders_on_the_configured_time_schedule():
     ]
     assert len(dca_orders) == 3
     assert [item["notional"] for item in dca_orders] == pytest.approx([200, 200, 200])
+
+
+def test_dca_rejected_order_does_not_consume_cycle_budget_or_order_count():
+    payload = build_executor_strategy_payload(
+        _robot_payload(
+            "dca",
+            dca_interval_minutes=60,
+            dca_max_orders=2,
+            dca_total_budget_pct=0.4,
+            trailing_take_profit_enabled=False,
+            take_profit_pct=0,
+            hard_stop_pct=0,
+        ),
+        user_id=7,
+    )
+    instrument = "Crypto:BTC/USDT@spot"
+    index = pd.date_range("2026-01-01", periods=3, freq="1h")
+    frame = pd.DataFrame({
+        "open": [100.0] * 3,
+        "high": [100.0] * 3,
+        "low": [100.0] * 3,
+        "close": [100.0] * 3,
+        "volume": [100000.0] * 3,
+    }, index=index)
+    session = StrategyV2LiveSession(
+        code=payload["code"],
+        frames={instrument: frame.iloc[:1]},
+        initial_capital=1000,
+    )
+
+    first, _, _ = session.process(
+        {instrument: frame.iloc[:1]},
+        schedule_time=index[0],
+    )
+    assert len(first) == 1
+    session.context.update_order_statuses({
+        first[0].client_order_id: {
+            "status": "rejected",
+            "client_order_id": first[0].client_order_id,
+        }
+    })
+
+    retry, _, _ = session.process(
+        {instrument: frame.iloc[:2]},
+        schedule_time=index[1],
+    )
+    assert len(retry) == 1
+    assert retry[0].client_order_id != first[0].client_order_id
+    state = session.session_snapshot()["strategyState"]
+    assert state["dca_order_count"] == 0
+    assert state["dca_spent_value"] == 0
+    assert state["dca_attempt"] == 1
 
 
 def test_dca_rising_market_never_turns_a_scheduled_purchase_into_a_sale():

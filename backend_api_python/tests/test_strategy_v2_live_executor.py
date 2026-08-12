@@ -1,8 +1,40 @@
+import inspect
+
 import pandas as pd
+import app.services.trading_executor as trading_executor
 
 from app.services.strategy_v2 import OrderIntent
 from app.services.strategy_v2.live_execution import LiveOrderRequest, StrategyV2OrderGateway
 from app.services.trading_executor import TradingExecutor, _log_frame_diagnostics, live_history_days
+
+
+def test_load_source_upgrades_legacy_robot_allocations_at_runtime(monkeypatch):
+    legacy = """AMOUNTS = [100.0, 300.0]
+INITIAL_POSITION_PCT = 0.2
+initial_value = sum(AMOUNTS) * INITIAL_POSITION_PCT
+g.target_value += float(AMOUNTS[g.next_level] or 0.0)
+"""
+
+    class _Sources:
+        @staticmethod
+        def get_source(_source_id, user_id=None):
+            return {"code": legacy}
+
+    logs = []
+    monkeypatch.setattr(trading_executor, "get_script_source_service", lambda: _Sources())
+    monkeypatch.setattr(trading_executor, "append_strategy_log", lambda *args: logs.append(args))
+
+    source_id, code = TradingExecutor._load_source({
+        "id": 11,
+        "user_id": 7,
+        "template_key": "robot_v2_layered_martingale",
+        "trading_config": {"script_source_id": 9, "executor_type": "layered_martingale"},
+    })
+
+    assert source_id == 9
+    assert "AMOUNT_WEIGHTS = [0.25, 0.75]" in code
+    assert "AMOUNTS" not in code
+    assert logs and logs[0][0] == 11
 
 
 def test_live_history_lookback_is_frequency_aware():
@@ -536,17 +568,18 @@ def test_demo_account_price_overrides_public_market_price(monkeypatch):
     assert prices["Crypto:BTC/USDT@binance:swap"] == 63_943.1
 
 
-def test_live_frame_latest_bar_is_aligned_to_execution_account_price():
+def test_live_frame_latest_completed_bar_is_not_overwritten_by_execution_price():
     frame = _frame(price=64_294.6)
-    key = "Crypto:BTC/USDT@binance:swap"
+    before = frame.iloc[-1][["open", "high", "low", "close"]].tolist()
 
-    aligned = TradingExecutor._align_latest_frame_prices({key: frame}, {key: 63_943.1})
-
-    assert aligned[key].iloc[-1][["open", "high", "low", "close"]].tolist() == [
-        63_943.1,
-        63_943.1,
-        63_943.1,
-        63_943.1,
+    # Signal frames come only from the completed-candle fetch path. Execution
+    # account prices are passed separately to protection/equity evaluation.
+    assert not hasattr(TradingExecutor, "_align_latest_frame_prices")
+    assert frame.iloc[-1][["open", "high", "low", "close"]].tolist() == before == [
+        64_294.6,
+        64_294.6,
+        64_294.6,
+        64_294.6,
     ]
 
 
@@ -578,3 +611,56 @@ def test_live_order_uses_execution_price_without_mutating_closed_bar():
     assert result is True
     assert captured["current_price"] == 63_943.1
     pd.testing.assert_frame_equal(frame, original)
+
+
+def test_live_loop_does_not_use_realtime_price_hook_for_strategy_orders():
+    source = inspect.getsource(TradingExecutor._run_strategy_loop)
+
+    assert ".evaluate_price_tick(" not in source
+    assert ".evaluate_equity_risk(" in source
+    assert ".evaluate_protections(" in source
+
+
+def test_current_equity_matches_position_aliases_to_runtime_prices(monkeypatch):
+    class Cursor:
+        @staticmethod
+        def execute(*_args, **_kwargs):
+            return None
+
+        @staticmethod
+        def fetchone():
+            return {"realized_pnl": 0}
+
+        @staticmethod
+        def close():
+            return None
+
+    class Database:
+        @staticmethod
+        def cursor():
+            return Cursor()
+
+    class Connection:
+        @staticmethod
+        def __enter__():
+            return Database()
+
+        @staticmethod
+        def __exit__(*_args):
+            return None
+
+    monkeypatch.setattr(trading_executor, "get_db_connection", Connection)
+
+    equity = TradingExecutor.__new__(TradingExecutor)._calculate_current_equity(
+        7,
+        1_000.0,
+        current_positions=[{
+            "symbol": "BTCUSDT",
+            "side": "long",
+            "size": 2.0,
+            "entry_price": 100.0,
+        }],
+        current_prices={"Crypto:BTC/USDT@binance:swap": 110.0},
+    )
+
+    assert equity == 1_020.0

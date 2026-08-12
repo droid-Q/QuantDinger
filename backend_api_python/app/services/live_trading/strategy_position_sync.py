@@ -39,12 +39,9 @@ def strategy_uses_fill_ledger(strategy_config: Dict[str, Any]) -> bool:
     ).strip().lower()
     if explicit:
         return explicit == "fills"
-    bot_type = str(
-        sc.get("bot_type")
-        or tc.get("bot_type")
-        or tc.get("executor_type")
-        or ""
-    ).strip().lower()
+    from app.services.strategy_runtime.bot_type import resolve_bot_type
+
+    bot_type = resolve_bot_type(sc, tc)
     if bot_type in _FILL_LEDGER_BOT_TYPES:
         return True
     stype = str(sc.get("strategy_type") or "").strip()
